@@ -18,12 +18,18 @@ public class StudentRepository : IStudentRepository
         => await _context.Students.FindAsync([id], cancellationToken);
 
     public async Task<Student?> GetByEmailAsync(string email, CancellationToken cancellationToken = default)
-        => await _context.Students
-            .FirstOrDefaultAsync(s => s.Email.Value == email.ToLowerInvariant(), cancellationToken);
+    {
+        var normalizedEmail = email.Trim().ToLowerInvariant();
+        return await _context.Students
+            .FirstOrDefaultAsync(s => s.Email.Value == normalizedEmail, cancellationToken);
+    }
 
     public async Task<bool> ExistsByEmailAsync(string email, CancellationToken cancellationToken = default)
-        => await _context.Students
-            .AnyAsync(s => s.Email.Value == email.ToLowerInvariant(), cancellationToken);
+    {
+        var normalizedEmail = email.Trim().ToLowerInvariant();
+        return await _context.Students
+            .AnyAsync(s => s.Email.Value == normalizedEmail, cancellationToken);
+    }
 
     public async Task<IReadOnlyList<Student>> GetAllAsync(CancellationToken cancellationToken = default)
         => await _context.Students.ToListAsync(cancellationToken);

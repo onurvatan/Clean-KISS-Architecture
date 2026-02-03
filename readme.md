@@ -78,6 +78,28 @@ A simple, maintainable, domain-first architecture designed around clarity, testa
     /Models
       RegisterStudentRequest.cs
       StudentResponse.cs
+
+/tests
+  /Domain.Tests
+    /ValueObjects
+      EmailTests.cs
+      NameTests.cs
+    /Entities
+      StudentTests.cs
+
+  /Application.Tests
+    /Handlers
+      RegisterStudentHandlerTests.cs
+      GetStudentHandlerTests.cs
+      DeleteStudentHandlerTests.cs
+
+  /Infrastructure.Tests
+    /Repositories
+      StudentRepositoryTests.cs
+
+  /API.Tests
+    /Controllers
+      StudentsControllerTests.cs
 ```
 
 ---
@@ -854,7 +876,210 @@ Clean, explicit wiring — no assembly scanning magic.
 
 ---
 
-## 🧠 Why This Architecture Works
+## � Testing Strategy
+
+### Test Project Structure
+
+| Project                | Tests                                 | Dependencies          |
+| ---------------------- | ------------------------------------- | --------------------- |
+| `Domain.Tests`         | Value objects, entities, domain logic | None (pure)           |
+| `Application.Tests`    | Handlers, business rules              | Mocked repositories   |
+| `Infrastructure.Tests` | Repositories, EF queries              | In-memory database    |
+| `API.Tests`            | Controllers, integration              | WebApplicationFactory |
+
+### Domain Tests (Pure, No Mocks)
+
+```csharp
+public class EmailTests
+{
+    [Fact]
+    public void Constructor_WithValidEmail_CreatesEmail()
+    {
+        // Arrange & Act
+        var email = new Email("test@example.com");
+
+        // Assert
+        Assert.Equal("test@example.com", email.Value);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    [InlineData(null)]
+    public void Constructor_WithEmptyEmail_ThrowsArgumentException(string? value)
+    {
+        // Act & Assert
+        Assert.Throws<ArgumentException>(() => new Email(value!));
+    }
+
+    [Fact]
+    public void Constructor_WithInvalidFormat_ThrowsArgumentException()
+    {
+        // Act & Assert
+        Assert.Throws<ArgumentException>(() => new Email("invalid-email"));
+    }
+}
+```
+
+### Handler Tests (Mocked Dependencies)
+
+```csharp
+public class RegisterStudentHandlerTests
+{
+    private readonly Mock<IStudentRepository> _repositoryMock;
+    private readonly Mock<IUnitOfWork> _unitOfWorkMock;
+    private readonly Mock<ICacheService> _cacheMock;
+    private readonly RegisterStudentHandler _handler;
+
+    public RegisterStudentHandlerTests()
+    {
+        _repositoryMock = new Mock<IStudentRepository>();
+        _unitOfWorkMock = new Mock<IUnitOfWork>();
+        _cacheMock = new Mock<ICacheService>();
+        _handler = new RegisterStudentHandler(
+            _repositoryMock.Object,
+            _unitOfWorkMock.Object,
+            _cacheMock.Object);
+    }
+
+    [Fact]
+    public async Task Handle_WithNewEmail_ReturnsCreated()
+    {
+        // Arrange
+        var command = new RegisterStudentCommand("John Doe", "john@example.com");
+        _repositoryMock.Setup(r => r.ExistsByEmailAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+
+        // Act
+        var result = await _handler.Handle(command);
+
+        // Assert
+        Assert.True(result.IsSuccess);
+        Assert.Equal(201, result.StatusCode);
+        Assert.Equal("john@example.com", result.Value!.Email);
+    }
+
+    [Fact]
+    public async Task Handle_WithExistingEmail_ReturnsConflict()
+    {
+        // Arrange
+        var command = new RegisterStudentCommand("John Doe", "existing@example.com");
+        _repositoryMock.Setup(r => r.ExistsByEmailAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+
+        // Act
+        var result = await _handler.Handle(command);
+
+        // Assert
+        Assert.True(result.IsFailure);
+        Assert.Equal(409, result.StatusCode);
+    }
+
+    [Fact]
+    public async Task Handle_WithInvalidEmail_ThrowsArgumentException()
+    {
+        // Arrange
+        var command = new RegisterStudentCommand("John Doe", "invalid-email");
+        _repositoryMock.Setup(r => r.ExistsByEmailAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+
+        // Act & Assert
+        await Assert.ThrowsAsync<ArgumentException>(() => _handler.Handle(command));
+    }
+
+    [Fact]
+    public async Task Handle_Success_InvalidatesCache()
+    {
+        // Arrange
+        var command = new RegisterStudentCommand("John Doe", "john@example.com");
+        _repositoryMock.Setup(r => r.ExistsByEmailAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+
+        // Act
+        await _handler.Handle(command);
+
+        // Assert
+        _cacheMock.Verify(c => c.RemoveAsync(CacheKeys.AllStudents, It.IsAny<CancellationToken>()), Times.Once);
+    }
+}
+```
+
+### Integration Tests (WebApplicationFactory)
+
+```csharp
+public class StudentsControllerTests : IClassFixture<WebApplicationFactory<Program>>
+{
+    private readonly HttpClient _client;
+
+    public StudentsControllerTests(WebApplicationFactory<Program> factory)
+    {
+        _client = factory.WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureServices(services =>
+            {
+                // Replace DbContext with in-memory
+                services.RemoveAll<DbContextOptions<AppDbContext>>();
+                services.AddDbContext<AppDbContext>(options =>
+                    options.UseInMemoryDatabase("TestDb"));
+            });
+        }).CreateClient();
+    }
+
+    [Fact]
+    public async Task Register_WithValidRequest_ReturnsCreated()
+    {
+        // Arrange
+        var request = new { Name = "John Doe", Email = "john@example.com" };
+
+        // Act
+        var response = await _client.PostAsJsonAsync("/api/students", request);
+
+        // Assert
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Register_WithDuplicateEmail_ReturnsConflict()
+    {
+        // Arrange
+        var request = new { Name = "John Doe", Email = "duplicate@example.com" };
+        await _client.PostAsJsonAsync("/api/students", request);
+
+        // Act
+        var response = await _client.PostAsJsonAsync("/api/students", request);
+
+        // Assert
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetById_WithNonExistentId_ReturnsNotFound()
+    {
+        // Act
+        var response = await _client.GetAsync($"/api/students/{Guid.NewGuid()}");
+
+        // Assert
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+}
+```
+
+### Running Tests
+
+```bash
+# Run all tests
+dotnet test
+
+# Run with coverage
+dotnet test --collect:"XPlat Code Coverage"
+
+# Run specific project
+dotnet test tests/Application.Tests
+```
+
+---
+
+## �🧠 Why This Architecture Works
 
 - ✅ Easy to debug locally
 - ✅ Easy to test
