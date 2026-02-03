@@ -46,6 +46,7 @@ A simple, maintainable, domain-first architecture designed around clarity, testa
     /Services
       IEmailService.cs
       IClock.cs
+      ICacheService.cs
     /Abstractions
       IHandler.cs
       Result.cs
@@ -64,6 +65,7 @@ A simple, maintainable, domain-first architecture designed around clarity, testa
     /Services
       EmailService.cs
       Clock.cs
+      CacheService.cs
 
   /API
     /Controllers
@@ -252,6 +254,211 @@ public class UnitOfWork : IUnitOfWork
         => _context.SaveChangesAsync(cancellationToken);
 }
 ```
+
+---
+
+## 📦 Caching
+
+### Interface
+
+```csharp
+// Application/Services/ICacheService.cs
+public interface ICacheService
+{
+    Task<T?> GetAsync<T>(string key, CancellationToken cancellationToken = default);
+    Task SetAsync<T>(string key, T value, TimeSpan? expiration = null, CancellationToken cancellationToken = default);
+    Task RemoveAsync(string key, CancellationToken cancellationToken = default);
+    Task<T> GetOrCreateAsync<T>(string key, Func<Task<T>> factory, TimeSpan? expiration = null, CancellationToken cancellationToken = default);
+}
+```
+
+### Implementation (using IMemoryCache)
+
+```csharp
+// Infrastructure/Services/CacheService.cs
+public class CacheService : ICacheService
+{
+    private readonly IMemoryCache _cache;
+    private static readonly TimeSpan DefaultExpiration = TimeSpan.FromMinutes(5);
+
+    public CacheService(IMemoryCache cache)
+    {
+        _cache = cache;
+    }
+
+    public Task<T?> GetAsync<T>(string key, CancellationToken cancellationToken = default)
+    {
+        _cache.TryGetValue(key, out T? value);
+        return Task.FromResult(value);
+    }
+
+    public Task SetAsync<T>(string key, T value, TimeSpan? expiration = null, CancellationToken cancellationToken = default)
+    {
+        var options = new MemoryCacheEntryOptions
+        {
+            AbsoluteExpirationRelativeToNow = expiration ?? DefaultExpiration
+        };
+        _cache.Set(key, value, options);
+        return Task.CompletedTask;
+    }
+
+    public Task RemoveAsync(string key, CancellationToken cancellationToken = default)
+    {
+        _cache.Remove(key);
+        return Task.CompletedTask;
+    }
+
+    public async Task<T> GetOrCreateAsync<T>(string key, Func<Task<T>> factory, TimeSpan? expiration = null, CancellationToken cancellationToken = default)
+    {
+        if (_cache.TryGetValue(key, out T? value) && value is not null)
+            return value;
+
+        value = await factory();
+        await SetAsync(key, value, expiration, cancellationToken);
+        return value;
+    }
+}
+```
+
+### Implementation (using Redis)
+
+```csharp
+// Infrastructure/Services/RedisCacheService.cs
+public class RedisCacheService : ICacheService
+{
+    private readonly IDistributedCache _cache;
+    private static readonly TimeSpan DefaultExpiration = TimeSpan.FromMinutes(5);
+
+    public RedisCacheService(IDistributedCache cache)
+    {
+        _cache = cache;
+    }
+
+    public async Task<T?> GetAsync<T>(string key, CancellationToken cancellationToken = default)
+    {
+        var data = await _cache.GetStringAsync(key, cancellationToken);
+        return data is null ? default : JsonSerializer.Deserialize<T>(data);
+    }
+
+    public async Task SetAsync<T>(string key, T value, TimeSpan? expiration = null, CancellationToken cancellationToken = default)
+    {
+        var options = new DistributedCacheEntryOptions
+        {
+            AbsoluteExpirationRelativeToNow = expiration ?? DefaultExpiration
+        };
+        var data = JsonSerializer.Serialize(value);
+        await _cache.SetStringAsync(key, data, options, cancellationToken);
+    }
+
+    public Task RemoveAsync(string key, CancellationToken cancellationToken = default)
+        => _cache.RemoveAsync(key, cancellationToken);
+
+    public async Task<T> GetOrCreateAsync<T>(string key, Func<Task<T>> factory, TimeSpan? expiration = null, CancellationToken cancellationToken = default)
+    {
+        var cached = await GetAsync<T>(key, cancellationToken);
+        if (cached is not null)
+            return cached;
+
+        var value = await factory();
+        await SetAsync(key, value, expiration, cancellationToken);
+        return value;
+    }
+}
+```
+
+### Cache Key Helper
+
+```csharp
+// Application/Extensions/CacheKeys.cs
+public static class CacheKeys
+{
+    public static string Student(Guid id) => $"student:{id}";
+    public static string StudentByEmail(string email) => $"student:email:{email}";
+    public static string AllStudents => "students:all";
+}
+```
+
+### Usage in Query Handler
+
+```csharp
+public class GetStudentHandler : IHandler<GetStudentQuery, StudentDto>
+{
+    private readonly IStudentRepository _repository;
+    private readonly ICacheService _cache;
+
+    public GetStudentHandler(IStudentRepository repository, ICacheService cache)
+    {
+        _repository = repository;
+        _cache = cache;
+    }
+
+    public async Task<Result<StudentDto>> Handle(GetStudentQuery query, CancellationToken cancellationToken = default)
+    {
+        var cacheKey = CacheKeys.Student(query.Id);
+
+        var dto = await _cache.GetOrCreateAsync(cacheKey, async () =>
+        {
+            var student = await _repository.GetByIdAsync(query.Id, cancellationToken);
+            return student?.ToDto();
+        }, TimeSpan.FromMinutes(10), cancellationToken);
+
+        if (dto is null)
+            return Result<StudentDto>.NotFound("Student not found");
+
+        return Result<StudentDto>.Success(dto);
+    }
+}
+```
+
+### Cache Invalidation in Command Handler
+
+```csharp
+public class RegisterStudentHandler : IHandler<RegisterStudentCommand, StudentDto>
+{
+    private readonly IStudentRepository _repository;
+    private readonly IUnitOfWork _unitOfWork;
+    private readonly ICacheService _cache;
+
+    public RegisterStudentHandler(
+        IStudentRepository repository, 
+        IUnitOfWork unitOfWork,
+        ICacheService cache)
+    {
+        _repository = repository;
+        _unitOfWork = unitOfWork;
+        _cache = cache;
+    }
+
+    public async Task<Result<StudentDto>> Handle(RegisterStudentCommand command, CancellationToken cancellationToken = default)
+    {
+        var exists = await _repository.ExistsByEmailAsync(command.Email, cancellationToken);
+        if (exists)
+            return Result<StudentDto>.Conflict("A student with this email already exists");
+
+        var email = new Email(command.Email);
+        var student = new Student(command.Name, email);
+
+        await _repository.AddAsync(student, cancellationToken);
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+        // Invalidate list cache
+        await _cache.RemoveAsync(CacheKeys.AllStudents, cancellationToken);
+
+        return Result<StudentDto>.Created(student.ToDto());
+    }
+}
+```
+
+### Caching Strategy
+
+| Operation | Cache Action | Why |
+|-----------|--------------|-----|
+| **Query (Get)** | Cache result | Reduce database hits |
+| **Create** | Invalidate list cache | List is now stale |
+| **Update** | Invalidate item + list cache | Both are stale |
+| **Delete** | Invalidate item + list cache | Both are stale |
+
+> Cache in **query handlers**, invalidate in **command handlers**.
 
 ---
 
@@ -564,6 +771,15 @@ public static class DependencyInjection
         services.AddScoped<IEmailService, EmailService>();
         services.AddSingleton<IClock, Clock>();
 
+        // Caching (choose one)
+        services.AddMemoryCache();
+        services.AddSingleton<ICacheService, CacheService>();
+
+        // Or for Redis:
+        // services.AddStackExchangeRedisCache(options =>
+        //     options.Configuration = config.GetConnectionString("Redis"));
+        // services.AddSingleton<ICacheService, RedisCacheService>();
+
         return services;
     }
 }
@@ -629,5 +845,6 @@ Clean, explicit wiring — no assembly scanning magic.
 - ✅ Global exception handling as safety net
 - ✅ CancellationToken support throughout
 - ✅ Unit of Work for explicit transaction control
+- ✅ Simple caching with cache-aside pattern
 
 > This is the architecture you build when you care about clarity, maintainability, and real-world productivity.
