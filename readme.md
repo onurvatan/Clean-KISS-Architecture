@@ -56,6 +56,7 @@ A simple, maintainable, domain-first architecture designed around clarity, testa
       AuthorizeAttribute.cs
       AuthorizedHandler.cs
       Permissions.cs
+      IIdempotencyService.cs
 
   /Infrastructure
     /Persistence
@@ -73,6 +74,8 @@ A simple, maintainable, domain-first architecture designed around clarity, testa
       CacheService.cs
       CurrentUser.cs
       AuthorizationService.cs
+      IdempotencyService.cs
+      RedisIdempotencyService.cs
 
   /API
     /Controllers
@@ -80,6 +83,7 @@ A simple, maintainable, domain-first architecture designed around clarity, testa
       CoursesController.cs
     /Middleware
       ExceptionMiddleware.cs
+      IdempotencyMiddleware.cs
     /Extensions
       ResultExtensions.cs
     /Models
@@ -1069,6 +1073,223 @@ Register in `Program.cs`:
 ```csharp
 app.UseMiddleware<ExceptionMiddleware>();
 ```
+
+---
+
+## 🔁 Idempotency Middleware
+
+Idempotency ensures that duplicate requests (e.g., retries after timeout) produce the same response — including the **same status code**. This prevents duplicate orders, payments, or any state mutation from network retries.
+
+### Interface
+
+```csharp
+// Application/Abstractions/IIdempotencyService.cs
+public interface IIdempotencyService
+{
+    Task<IdempotencyResult> TryGetAsync(string key, CancellationToken ct = default);
+    Task StoreAsync(string key, int statusCode, string body, TimeSpan? expiry = null, CancellationToken ct = default);
+}
+
+public record IdempotencyResult(bool Exists, int StatusCode, string? Body);
+```
+
+### Middleware
+
+```csharp
+// API/Middleware/IdempotencyMiddleware.cs
+public sealed class IdempotencyMiddleware
+{
+    private readonly RequestDelegate _next;
+    private const string IdempotencyKeyHeader = "X-Idempotency-Key";
+
+    private static readonly HashSet<string> IdempotentMethods = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "POST", "PUT", "PATCH", "DELETE"
+    };
+
+    public IdempotencyMiddleware(RequestDelegate next)
+    {
+        _next = next;
+    }
+
+    public async Task InvokeAsync(HttpContext context, IIdempotencyService idempotencyService)
+    {
+        // Skip safe methods (GET, HEAD, OPTIONS)
+        if (!IdempotentMethods.Contains(context.Request.Method))
+        {
+            await _next(context);
+            return;
+        }
+
+        // No idempotency key provided - proceed normally
+        if (!context.Request.Headers.TryGetValue(IdempotencyKeyHeader, out var keyValues) ||
+            string.IsNullOrWhiteSpace(keyValues.FirstOrDefault()))
+        {
+            await _next(context);
+            return;
+        }
+
+        var idempotencyKey = keyValues.First()!;
+        var cached = await idempotencyService.TryGetAsync(idempotencyKey, context.RequestAborted);
+
+        if (cached.Exists)
+        {
+            // Return EXACT same response (status + body)
+            context.Response.StatusCode = cached.StatusCode;
+            context.Response.ContentType = "application/json";
+            context.Response.Headers["X-Idempotent-Replayed"] = "true";
+
+            if (!string.IsNullOrEmpty(cached.Body))
+                await context.Response.WriteAsync(cached.Body, context.RequestAborted);
+
+            return;
+        }
+
+        // Capture and store response
+        var originalBodyStream = context.Response.Body;
+        using var memoryStream = new MemoryStream();
+        context.Response.Body = memoryStream;
+
+        try
+        {
+            await _next(context);
+
+            memoryStream.Position = 0;
+            var responseBody = await new StreamReader(memoryStream).ReadToEndAsync(context.RequestAborted);
+
+            await idempotencyService.StoreAsync(
+                idempotencyKey,
+                context.Response.StatusCode,
+                responseBody,
+                ct: context.RequestAborted);
+
+            memoryStream.Position = 0;
+            await memoryStream.CopyToAsync(originalBodyStream, context.RequestAborted);
+        }
+        finally
+        {
+            context.Response.Body = originalBodyStream;
+        }
+    }
+}
+```
+
+### In-Memory Implementation (Development)
+
+```csharp
+// Infrastructure/Services/IdempotencyService.cs
+public sealed class IdempotencyService : IIdempotencyService
+{
+    private readonly IMemoryCache _cache;
+    private static readonly TimeSpan DefaultExpiry = TimeSpan.FromHours(24);
+
+    public IdempotencyService(IMemoryCache cache)
+    {
+        _cache = cache;
+    }
+
+    public Task<IdempotencyResult> TryGetAsync(string key, CancellationToken ct = default)
+    {
+        var cacheKey = $"idempotency:{key}";
+        if (_cache.TryGetValue(cacheKey, out CachedResponse? cached) && cached is not null)
+            return Task.FromResult(new IdempotencyResult(true, cached.StatusCode, cached.Body));
+
+        return Task.FromResult(new IdempotencyResult(false, 0, null));
+    }
+
+    public Task StoreAsync(string key, int statusCode, string body, TimeSpan? expiry = null, CancellationToken ct = default)
+    {
+        var cacheKey = $"idempotency:{key}";
+        _cache.Set(cacheKey, new CachedResponse(statusCode, body), expiry ?? DefaultExpiry);
+        return Task.CompletedTask;
+    }
+
+    private sealed record CachedResponse(int StatusCode, string Body);
+}
+```
+
+### Redis Implementation (Production)
+
+```csharp
+// Infrastructure/Services/RedisIdempotencyService.cs
+public sealed class RedisIdempotencyService : IIdempotencyService
+{
+    private readonly IConnectionMultiplexer _redis;
+    private static readonly TimeSpan DefaultExpiry = TimeSpan.FromHours(24);
+
+    public RedisIdempotencyService(IConnectionMultiplexer redis)
+    {
+        _redis = redis;
+    }
+
+    public async Task<IdempotencyResult> TryGetAsync(string key, CancellationToken ct = default)
+    {
+        var db = _redis.GetDatabase();
+        var value = await db.StringGetAsync($"idempotency:{key}");
+
+        if (value.IsNullOrEmpty)
+            return new IdempotencyResult(false, 0, null);
+
+        var cached = JsonSerializer.Deserialize<CachedResponse>((string)value!);
+        return new IdempotencyResult(true, cached!.StatusCode, cached.Body);
+    }
+
+    public async Task StoreAsync(string key, int statusCode, string body, TimeSpan? expiry = null, CancellationToken ct = default)
+    {
+        var db = _redis.GetDatabase();
+        var serialized = JsonSerializer.Serialize(new CachedResponse(statusCode, body));
+        await db.StringSetAsync($"idempotency:{key}", serialized, expiry ?? DefaultExpiry);
+    }
+
+    private sealed record CachedResponse(int StatusCode, string Body);
+}
+```
+
+### Configuration-Based Registration
+
+```csharp
+// Infrastructure/DependencyInjection.cs
+
+// Idempotency (Redis for prod, in-memory for dev)
+var redisConnection = config.GetConnectionString("Redis");
+if (!string.IsNullOrEmpty(redisConnection))
+{
+    services.AddSingleton<IConnectionMultiplexer>(_ =>
+        ConnectionMultiplexer.Connect(redisConnection));
+    services.AddSingleton<IIdempotencyService, RedisIdempotencyService>();
+}
+else
+{
+    services.AddSingleton<IIdempotencyService, IdempotencyService>();
+}
+```
+
+### Usage
+
+```bash
+# First request - executes handler, returns 201
+curl -X POST /api/students \
+  -H "X-Idempotency-Key: order-abc-123" \
+  -d '{"name": "John", "email": "john@example.com"}'
+# Response: 201 Created
+
+# Retry (same key) - returns cached 201, not 409
+curl -X POST /api/students \
+  -H "X-Idempotency-Key: order-abc-123" \
+  -d '{"name": "John", "email": "john@example.com"}'
+# Response: 201 Created + X-Idempotent-Replayed: true
+```
+
+### Idempotency Behavior
+
+| Request  | Header                   | Response     | Note                               |
+| -------- | ------------------------ | ------------ | ---------------------------------- |
+| 1st POST | `X-Idempotency-Key: abc` | 201 + body   | Executed, cached                   |
+| 2nd POST | `X-Idempotency-Key: abc` | 201 + body   | Replayed from cache                |
+| 3rd POST | No header                | 409 Conflict | No idempotency, duplicate detected |
+| 4th POST | `X-Idempotency-Key: xyz` | 409 Conflict | Different key, duplicate detected  |
+
+> **Key insight**: True idempotency returns **identical responses** including status codes. Returning 409 on retry breaks client retry logic.
 
 ---
 

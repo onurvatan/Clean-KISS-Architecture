@@ -22,6 +22,9 @@ if (app.Environment.IsDevelopment())
 // Global exception handling
 app.UseMiddleware<ExceptionMiddleware>();
 
+// Idempotency for POST/PUT/PATCH/DELETE
+app.UseMiddleware<IdempotencyMiddleware>();
+
 app.UseHttpsRedirection();
 
 app.UseAuthorization();

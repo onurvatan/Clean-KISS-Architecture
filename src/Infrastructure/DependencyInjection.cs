@@ -7,6 +7,7 @@ using Infrastructure.Services;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using StackExchange.Redis;
 
 namespace Infrastructure;
 
@@ -30,6 +31,19 @@ public static class DependencyInjection
         // Caching
         services.AddMemoryCache();
         services.AddSingleton<ICacheService, CacheService>();
+
+        // Idempotency (Redis for prod, in-memory for dev)
+        var redisConnection = config.GetConnectionString("Redis");
+        if (!string.IsNullOrEmpty(redisConnection))
+        {
+            services.AddSingleton<IConnectionMultiplexer>(_ =>
+                ConnectionMultiplexer.Connect(redisConnection));
+            services.AddSingleton<IIdempotencyService, RedisIdempotencyService>();
+        }
+        else
+        {
+            services.AddSingleton<IIdempotencyService, IdempotencyService>();
+        }
 
         // Authorization
         services.AddHttpContextAccessor();
