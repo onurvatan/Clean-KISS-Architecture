@@ -5,12 +5,14 @@ using Application.DTOs;
 using Application.Handlers.DeleteStudent;
 using Application.Handlers.GetStudent;
 using Application.Handlers.RegisterStudent;
+using Asp.Versioning;
 using Microsoft.AspNetCore.Mvc;
 
 namespace API.Controllers;
 
 [ApiController]
-[Route("api/[controller]")]
+[ApiVersion(1.0)]
+[Route("api/v{version:apiVersion}/[controller]")]
 public class StudentsController : ControllerBase
 {
     private readonly IHandler<RegisterStudentCommand, StudentDto> _registerHandler;

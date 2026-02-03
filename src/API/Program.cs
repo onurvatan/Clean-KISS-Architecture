@@ -1,3 +1,11 @@
+using API.Middleware;
+using Application;
+using HealthChecks.Redis;
+using Infrastructure;
+using Serilog;
+using Serilog.Events;
+using System.Threading.RateLimiting;
+
 // Bootstrap logger for startup errors
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Override("Microsoft", LogEventLevel.Information)
@@ -32,6 +40,17 @@ try
 
     builder.Services.AddControllers();
     builder.Services.AddOpenApi();
+
+    // API Versioning
+    builder.Services.AddApiVersioning(options =>
+    {
+        options.DefaultApiVersion = new Asp.Versioning.ApiVersion(1, 0);
+        options.AssumeDefaultVersionWhenUnspecified = true;
+        options.ReportApiVersions = true;
+        options.ApiVersionReader = Asp.Versioning.ApiVersionReader.Combine(
+            new Asp.Versioning.UrlSegmentApiVersionReader(),
+            new Asp.Versioning.HeaderApiVersionReader("X-Api-Version"));
+    }).AddMvc();
 
     // Rate limiting
     builder.Services.AddRateLimiter(options =>

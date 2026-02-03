@@ -1730,6 +1730,108 @@ Content-Type: application/json
 
 ---
 
+## 🔢 API Versioning
+
+API versioning allows you to evolve your API without breaking existing clients. Supports URL segment and header-based versioning.
+
+### Configuration
+
+```csharp
+builder.Services.AddApiVersioning(options =>
+{
+    options.DefaultApiVersion = new ApiVersion(1, 0);
+    options.AssumeDefaultVersionWhenUnspecified = true;
+    options.ReportApiVersions = true;
+    options.ApiVersionReader = ApiVersionReader.Combine(
+        new UrlSegmentApiVersionReader(),
+        new HeaderApiVersionReader("X-Api-Version"));
+}).AddMvc();
+```
+
+### Controller Setup
+
+```csharp
+[ApiController]
+[ApiVersion(1.0)]
+[Route("api/v{version:apiVersion}/[controller]")]
+public class StudentsController : ControllerBase
+{
+    // ...
+}
+```
+
+### Versioning Strategies
+
+| Strategy    | Example                             | Use Case               |
+| ----------- | ----------------------------------- | ---------------------- |
+| URL Segment | `GET /api/v1/students`              | Most explicit, RESTful |
+| Header      | `X-Api-Version: 1.0`                | Cleaner URLs           |
+| Query       | `GET /api/students?api-version=1.0` | Easy for testing       |
+
+### Usage Examples
+
+```bash
+# URL segment (preferred)
+curl https://api.example.com/api/v1/students
+
+# Header-based
+curl https://api.example.com/api/v1/students \
+  -H "X-Api-Version: 1.0"
+
+# Response includes version info
+# api-supported-versions: 1.0
+# api-deprecated-versions: (if any)
+```
+
+### Adding a New Version
+
+```csharp
+[ApiController]
+[ApiVersion(1.0)]
+[ApiVersion(2.0)]
+[Route("api/v{version:apiVersion}/[controller]")]
+public class StudentsController : ControllerBase
+{
+    [HttpGet("{id}")]
+    public async Task<IActionResult> GetById(Guid id) { ... }
+
+    [HttpGet("{id}")]
+    [MapToApiVersion(2.0)]
+    public async Task<IActionResult> GetByIdV2(Guid id)
+    {
+        // New response format, additional fields, etc.
+    }
+}
+```
+
+### Deprecating a Version
+
+```csharp
+[ApiVersion(1.0, Deprecated = true)]
+[ApiVersion(2.0)]
+public class StudentsController : ControllerBase { }
+```
+
+Response headers will include:
+
+```
+api-deprecated-versions: 1.0
+api-supported-versions: 2.0
+```
+
+### Version Negotiation
+
+| Request                     | Version Used | Notes                      |
+| --------------------------- | ------------ | -------------------------- |
+| `/api/v1/students`          | 1.0          | URL segment takes priority |
+| `/api/v2/students`          | 2.0          | Explicit version           |
+| `/api/students` + header    | From header  | Falls back to header       |
+| `/api/students` (no header) | 1.0          | Default when unspecified   |
+
+> **Tip**: Use URL segment versioning as primary — it's explicit and works with all HTTP clients including browsers.
+
+---
+
 ## 🎯 Error Handling Strategy
 
 | Error Type              | Handled By                       | HTTP Status               |
