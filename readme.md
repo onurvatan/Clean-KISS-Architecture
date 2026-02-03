@@ -1966,6 +1966,160 @@ Activity.Tags:
 
 ---
 
+## ⚙️ Configuration Validation
+
+Fail fast at startup if required configuration is missing or invalid. No more runtime surprises from misconfigured apps.
+
+### Settings Classes
+
+```csharp
+// Application/Settings/DatabaseSettings.cs
+using System.ComponentModel.DataAnnotations;
+
+public class DatabaseSettings
+{
+    public const string SectionName = "ConnectionStrings";
+
+    [Required(ErrorMessage = "Database connection string 'Default' is required")]
+    public string Default { get; init; } = string.Empty;
+
+    public string? Redis { get; init; }
+}
+```
+
+```csharp
+// Application/Settings/JwtSettings.cs
+using System.ComponentModel.DataAnnotations;
+
+public class JwtSettings
+{
+    public const string SectionName = "Jwt";
+
+    [Required(ErrorMessage = "JWT Secret is required")]
+    [MinLength(32, ErrorMessage = "JWT Secret must be at least 32 characters")]
+    public string Secret { get; init; } = string.Empty;
+
+    [Required(ErrorMessage = "JWT Issuer is required")]
+    public string Issuer { get; init; } = string.Empty;
+
+    [Required(ErrorMessage = "JWT Audience is required")]
+    public string Audience { get; init; } = string.Empty;
+
+    [Range(1, 1440, ErrorMessage = "JWT ExpirationMinutes must be between 1 and 1440")]
+    public int ExpirationMinutes { get; init; } = 60;
+}
+```
+
+### Registration in Program.cs
+
+```csharp
+// Configuration validation (fail fast on missing required settings)
+builder.Services.AddOptions<DatabaseSettings>()
+    .BindConfiguration(DatabaseSettings.SectionName)
+    .ValidateDataAnnotations()
+    .ValidateOnStart();
+
+builder.Services.AddOptions<JwtSettings>()
+    .BindConfiguration(JwtSettings.SectionName)
+    .ValidateDataAnnotations()
+    .ValidateOnStart();
+```
+
+### appsettings.json Example
+
+```json
+{
+  "ConnectionStrings": {
+    "Default": "Server=localhost;Database=CleanKiss;Trusted_Connection=True;",
+    "Redis": "localhost:6379"
+  },
+  "Jwt": {
+    "Secret": "your-super-secret-key-at-least-32-chars",
+    "Issuer": "CleanKissApi",
+    "Audience": "CleanKissApi",
+    "ExpirationMinutes": 60
+  }
+}
+```
+
+### Startup Failure Example
+
+If configuration is missing or invalid, the app fails immediately with a clear error:
+
+```
+Unhandled exception. Microsoft.Extensions.Options.OptionsValidationException:
+DataAnnotation validation failed for 'JwtSettings' members:
+  'Secret' with the error: 'JWT Secret is required'.
+  'Issuer' with the error: 'JWT Issuer is required'.
+```
+
+### Injecting Validated Settings
+
+```csharp
+public class AuthService
+{
+    private readonly JwtSettings _settings;
+
+    public AuthService(IOptions<JwtSettings> options)
+    {
+        _settings = options.Value; // Guaranteed valid at this point
+    }
+
+    public string GenerateToken(...)
+    {
+        // Use _settings.Secret, _settings.Issuer, etc.
+    }
+}
+```
+
+### Validation Attributes
+
+| Attribute             | Purpose               | Example                         |
+| --------------------- | --------------------- | ------------------------------- |
+| `[Required]`          | Must have a value     | Connection strings, secrets     |
+| `[MinLength]`         | Minimum string length | Passwords, API keys             |
+| `[MaxLength]`         | Maximum string length | Names, descriptions             |
+| `[Range]`             | Numeric range         | Ports, timeouts, retry counts   |
+| `[Url]`               | Valid URL format      | API endpoints, webhook URLs     |
+| `[EmailAddress]`      | Valid email format    | Admin email, notification email |
+| `[RegularExpression]` | Custom pattern        | API key format, custom IDs      |
+
+### Custom Validation
+
+For complex rules, implement `IValidatableObject`:
+
+```csharp
+public class FeatureSettings : IValidatableObject
+{
+    public bool EnableFeatureX { get; init; }
+    public string? FeatureXApiKey { get; init; }
+
+    public IEnumerable<ValidationResult> Validate(ValidationContext context)
+    {
+        if (EnableFeatureX && string.IsNullOrEmpty(FeatureXApiKey))
+        {
+            yield return new ValidationResult(
+                "FeatureXApiKey is required when EnableFeatureX is true",
+                new[] { nameof(FeatureXApiKey) });
+        }
+    }
+}
+```
+
+### Benefits
+
+| Benefit          | Description                                        |
+| ---------------- | -------------------------------------------------- |
+| **Fail Fast**    | App won't start with invalid config                |
+| **Clear Errors** | Specific messages for each missing/invalid setting |
+| **Type Safety**  | Strongly-typed settings, no magic strings          |
+| **Testable**     | Settings classes can be unit tested                |
+| **Discoverable** | All required settings documented in one place      |
+
+> **Key insight**: Catch configuration errors at startup, not at 3 AM in production when a code path finally hits the missing setting.
+
+---
+
 ## 🎯 Error Handling Strategy
 
 | Error Type              | Handled By                       | HTTP Status               |

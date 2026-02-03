@@ -1,3 +1,12 @@
+using API.Middleware;
+using Application;
+using Infrastructure;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
+using Serilog;
+using Serilog.Events;
+using System.Threading.RateLimiting;
+
 // Bootstrap logger for startup errors
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Override("Microsoft", LogEventLevel.Information)
@@ -10,6 +19,17 @@ try
     Log.Information("Starting application");
 
     var builder = WebApplication.CreateBuilder(args);
+
+    // Configuration validation (fail fast on missing required settings)
+    builder.Services.AddOptions<Application.Settings.DatabaseSettings>()
+        .BindConfiguration(Application.Settings.DatabaseSettings.SectionName)
+        .ValidateDataAnnotations()
+        .ValidateOnStart();
+
+    builder.Services.AddOptions<Application.Settings.JwtSettings>()
+        .BindConfiguration(Application.Settings.JwtSettings.SectionName)
+        .ValidateDataAnnotations()
+        .ValidateOnStart();
 
     // Configure Serilog
     builder.Host.UseSerilog((context, services, configuration) => configuration
