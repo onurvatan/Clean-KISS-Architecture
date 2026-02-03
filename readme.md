@@ -331,6 +331,86 @@ app.UseMiddleware<ExceptionMiddleware>();
 
 ---
 
+## 🔌 Dependency Injection Setup
+
+### Project References
+
+```
+API → Application → Domain
+API → Infrastructure → Domain
+```
+
+- **Domain** has no dependencies (pure)
+- **Application** depends on Domain (uses interfaces, entities, value objects)
+- **Infrastructure** depends on Domain (implements interfaces)
+- **API** depends on Application + Infrastructure (wires everything together)
+
+### Infrastructure Registration
+
+```csharp
+// Infrastructure/DependencyInjection.cs
+public static class DependencyInjection
+{
+    public static IServiceCollection AddInfrastructure(this IServiceCollection services, IConfiguration config)
+    {
+        // DbContext
+        services.AddDbContext<AppDbContext>(options =>
+            options.UseSqlServer(config.GetConnectionString("Default")));
+
+        // Repositories
+        services.AddScoped<IStudentRepository, StudentRepository>();
+        services.AddScoped<ICourseRepository, CourseRepository>();
+
+        // External services
+        services.AddScoped<IEmailService, EmailService>();
+        services.AddSingleton<IClock, Clock>();
+
+        return services;
+    }
+}
+```
+
+### Application Registration
+
+```csharp
+// Application/DependencyInjection.cs
+public static class DependencyInjection
+{
+    public static IServiceCollection AddApplication(this IServiceCollection services)
+    {
+        // Register handlers
+        services.AddScoped<IHandler<RegisterStudentCommand, StudentDto>, RegisterStudentHandler>();
+        services.AddScoped<IHandler<GetStudentQuery, StudentDto>, GetStudentHandler>();
+
+        return services;
+    }
+}
+```
+
+### API Composition Root (Program.cs)
+
+```csharp
+var builder = WebApplication.CreateBuilder(args);
+
+// Register layers
+builder.Services.AddInfrastructure(builder.Configuration);
+builder.Services.AddApplication();
+
+builder.Services.AddControllers();
+
+var app = builder.Build();
+
+// Middleware pipeline
+app.UseMiddleware<ExceptionMiddleware>();
+app.MapControllers();
+
+app.Run();
+```
+
+Clean, explicit wiring — no assembly scanning magic.
+
+---
+
 ## 🧠 Why This Architecture Works
 
 - ✅ Easy to debug locally
