@@ -125,21 +125,40 @@ public class Result<T>
 {
     public T? Value { get; }
     public string? Error { get; }
+    public int StatusCode { get; }
     public bool IsSuccess => Error is null;
     public bool IsFailure => !IsSuccess;
 
-    private Result(T? value, string? error)
+    private Result(T? value, string? error, int statusCode)
     {
         Value = value;
         Error = error;
+        StatusCode = statusCode;
     }
 
-    public static Result<T> Success(T value) => new(value, null);
-    public static Result<T> Failure(string error) => new(default, error);
+    // Success
+    public static Result<T> Success(T value)
+        => new(value, null, 200);
+
+    public static Result<T> Created(T value)
+        => new(value, null, 201);
+
+    // Client errors
+    public static Result<T> BadRequest(string error)
+        => new(default, error, 400);
+
+    public static Result<T> NotFound(string error)
+        => new(default, error, 404);
+
+    public static Result<T> Conflict(string error)
+        => new(default, error, 409);
+
+    public static Result<T> Forbidden(string error)
+        => new(default, error, 403);
 }
 ```
 
-No exceptions for expected failures. Clean, predictable control flow.
+No exceptions for expected failures. Clean, predictable control flow with built-in HTTP semantics.
 
 ---
 
@@ -199,7 +218,7 @@ public class RegisterStudentHandler : IHandler<RegisterStudentCommand, StudentDt
         // Business validation: check uniqueness
         var exists = await _repository.ExistsByEmailAsync(command.Email);
         if (exists)
-            return Result<StudentDto>.Failure("A student with this email already exists");
+            return Result<StudentDto>.Conflict("A student with this email already exists");
 
         // Value object validates format (throws if invalid)
         var email = new Email(command.Email);
@@ -207,7 +226,7 @@ public class RegisterStudentHandler : IHandler<RegisterStudentCommand, StudentDt
 
         await _repository.AddAsync(student);
 
-        return Result<StudentDto>.Success(student.ToDto());
+        return Result<StudentDto>.Created(student.ToDto());
     }
 }
 ```
@@ -236,6 +255,38 @@ public static class StudentExtensions
 
 ## 🌐 API Result Handling
 
+### Result Extension for Controllers
+
+```csharp
+// API/Extensions/ResultExtensions.cs
+public static class ResultExtensions
+{
+    public static IActionResult ToActionResult<T>(this Result<T> result, ControllerBase controller)
+    {
+        if (result.IsSuccess)
+        {
+            return result.StatusCode switch
+            {
+                201 => controller.CreatedAtAction(null, result.Value),
+                204 => controller.NoContent(),
+                _ => controller.Ok(result.Value)
+            };
+        }
+
+        return result.StatusCode switch
+        {
+            400 => controller.BadRequest(new { error = result.Error }),
+            404 => controller.NotFound(new { error = result.Error }),
+            403 => controller.Forbid(),
+            409 => controller.Conflict(new { error = result.Error }),
+            _ => controller.BadRequest(new { error = result.Error })
+        };
+    }
+}
+```
+
+### Controller Usage
+
 ```csharp
 [ApiController]
 [Route("api/[controller]")]
@@ -253,16 +304,12 @@ public class StudentsController : ControllerBase
     {
         var command = new RegisterStudentCommand(request.Name, request.Email);
         var result = await _handler.Handle(command);
-
-        if (result.IsFailure)
-            return BadRequest(new { error = result.Error });
-
-        return Ok(result.Value);
+        return result.ToActionResult(this);
     }
 }
 ```
 
-Clean mapping from `Result<T>` to HTTP status codes.
+One-liner result handling — no repetitive if/else in every action.
 
 ---
 
