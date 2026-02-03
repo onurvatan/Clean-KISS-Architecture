@@ -51,6 +51,11 @@ A simple, maintainable, domain-first architecture designed around clarity, testa
       IHandler.cs
       Result.cs
       IUnitOfWork.cs
+      IAuthorizationService.cs
+      ICurrentUser.cs
+      AuthorizeAttribute.cs
+      AuthorizedHandler.cs
+      Permissions.cs
 
   /Infrastructure
     /Persistence
@@ -66,6 +71,8 @@ A simple, maintainable, domain-first architecture designed around clarity, testa
       EmailService.cs
       Clock.cs
       CacheService.cs
+      CurrentUser.cs
+      AuthorizationService.cs
 
   /API
     /Controllers
@@ -251,7 +258,305 @@ Simple, generic, testable, with cancellation support.
 
 ---
 
-## 🔄 Unit of Work
+## � Authorization Layer
+
+The authorization layer sits **before** handlers to verify that the current user's token has permission to execute the requested operation.
+
+### Authorization Interfaces
+
+```csharp
+// Application/Abstractions/IAuthorizationService.cs
+public interface IAuthorizationService
+{
+    Task<bool> HasPermissionAsync(string permission, CancellationToken cancellationToken = default);
+    Task<bool> HasAnyPermissionAsync(IEnumerable<string> permissions, CancellationToken cancellationToken = default);
+    Task<bool> IsInRoleAsync(string role, CancellationToken cancellationToken = default);
+    string? GetUserId();
+}
+```
+
+```csharp
+// Application/Abstractions/ICurrentUser.cs
+public interface ICurrentUser
+{
+    string? Id { get; }
+    string? Email { get; }
+    IReadOnlyList<string> Roles { get; }
+    IReadOnlyList<string> Permissions { get; }
+    bool IsAuthenticated { get; }
+}
+```
+
+### Authorize Attribute for Handlers
+
+```csharp
+// Application/Abstractions/AuthorizeAttribute.cs
+[AttributeUsage(AttributeTargets.Class, AllowMultiple = true)]
+public class AuthorizeAttribute : Attribute
+{
+    public string? Permission { get; }
+    public string? Role { get; }
+
+    public AuthorizeAttribute() { }
+
+    public AuthorizeAttribute(string permission)
+    {
+        Permission = permission;
+    }
+
+    public static AuthorizeAttribute ForRole(string role) => new() { Role = role };
+}
+```
+
+### Permissions Constants
+
+```csharp
+// Application/Abstractions/Permissions.cs
+public static class Permissions
+{
+    public static class Students
+    {
+        public const string View = "students:view";
+        public const string Create = "students:create";
+        public const string Update = "students:update";
+        public const string Delete = "students:delete";
+    }
+
+    public static class Courses
+    {
+        public const string View = "courses:view";
+        public const string Create = "courses:create";
+        public const string Update = "courses:update";
+        public const string Delete = "courses:delete";
+    }
+}
+```
+
+### Authorization Decorator
+
+```csharp
+// Application/Abstractions/AuthorizedHandler.cs
+public class AuthorizedHandler<TRequest, TResponse> : IHandler<TRequest, TResponse>
+{
+    private readonly IHandler<TRequest, TResponse> _inner;
+    private readonly IAuthorizationService _authorizationService;
+
+    public AuthorizedHandler(IHandler<TRequest, TResponse> inner, IAuthorizationService authorizationService)
+    {
+        _inner = inner;
+        _authorizationService = authorizationService;
+    }
+
+    public async Task<Result<TResponse>> Handle(TRequest request, CancellationToken cancellationToken = default)
+    {
+        var handlerType = _inner.GetType();
+        var authorizeAttributes = handlerType.GetCustomAttributes<AuthorizeAttribute>().ToList();
+
+        if (authorizeAttributes.Count == 0)
+            return await _inner.Handle(request, cancellationToken);
+
+        foreach (var attr in authorizeAttributes)
+        {
+            if (attr.Permission is not null)
+            {
+                if (!await _authorizationService.HasPermissionAsync(attr.Permission, cancellationToken))
+                    return Result<TResponse>.Forbidden($"Missing permission: {attr.Permission}");
+            }
+
+            if (attr.Role is not null)
+            {
+                if (!await _authorizationService.IsInRoleAsync(attr.Role, cancellationToken))
+                    return Result<TResponse>.Forbidden($"Missing role: {attr.Role}");
+            }
+        }
+
+        return await _inner.Handle(request, cancellationToken);
+    }
+}
+
+// Non-generic version
+public class AuthorizedHandler<TRequest> : IHandler<TRequest>
+{
+    private readonly IHandler<TRequest> _inner;
+    private readonly IAuthorizationService _authorizationService;
+
+    public AuthorizedHandler(IHandler<TRequest> inner, IAuthorizationService authorizationService)
+    {
+        _inner = inner;
+        _authorizationService = authorizationService;
+    }
+
+    public async Task<Result> Handle(TRequest request, CancellationToken cancellationToken = default)
+    {
+        var handlerType = _inner.GetType();
+        var authorizeAttributes = handlerType.GetCustomAttributes<AuthorizeAttribute>().ToList();
+
+        if (authorizeAttributes.Count == 0)
+            return await _inner.Handle(request, cancellationToken);
+
+        foreach (var attr in authorizeAttributes)
+        {
+            if (attr.Permission is not null)
+            {
+                if (!await _authorizationService.HasPermissionAsync(attr.Permission, cancellationToken))
+                    return Result.Forbidden($"Missing permission: {attr.Permission}");
+            }
+
+            if (attr.Role is not null)
+            {
+                if (!await _authorizationService.IsInRoleAsync(attr.Role, cancellationToken))
+                    return Result.Forbidden($"Missing role: {attr.Role}");
+            }
+        }
+
+        return await _inner.Handle(request, cancellationToken);
+    }
+}
+```
+
+### Infrastructure Implementation
+
+```csharp
+// Infrastructure/Services/CurrentUser.cs
+public class CurrentUser : ICurrentUser
+{
+    private readonly IHttpContextAccessor _httpContextAccessor;
+
+    public CurrentUser(IHttpContextAccessor httpContextAccessor)
+    {
+        _httpContextAccessor = httpContextAccessor;
+    }
+
+    private ClaimsPrincipal? User => _httpContextAccessor.HttpContext?.User;
+
+    public string? Id => User?.FindFirstValue(ClaimTypes.NameIdentifier);
+    public string? Email => User?.FindFirstValue(ClaimTypes.Email);
+    public bool IsAuthenticated => User?.Identity?.IsAuthenticated ?? false;
+
+    public IReadOnlyList<string> Roles =>
+        User?.FindAll(ClaimTypes.Role).Select(c => c.Value).ToList() ?? [];
+
+    public IReadOnlyList<string> Permissions =>
+        User?.FindAll("permission").Select(c => c.Value).ToList() ?? [];
+}
+```
+
+```csharp
+// Infrastructure/Services/AuthorizationService.cs
+public class AuthorizationService : IAuthorizationService
+{
+    private readonly ICurrentUser _currentUser;
+
+    public AuthorizationService(ICurrentUser currentUser)
+    {
+        _currentUser = currentUser;
+    }
+
+    public string? GetUserId() => _currentUser.Id;
+
+    public Task<bool> HasPermissionAsync(string permission, CancellationToken cancellationToken = default)
+    {
+        var hasPermission = _currentUser.Permissions.Contains(permission);
+        return Task.FromResult(hasPermission);
+    }
+
+    public Task<bool> HasAnyPermissionAsync(IEnumerable<string> permissions, CancellationToken cancellationToken = default)
+    {
+        var hasAny = permissions.Any(p => _currentUser.Permissions.Contains(p));
+        return Task.FromResult(hasAny);
+    }
+
+    public Task<bool> IsInRoleAsync(string role, CancellationToken cancellationToken = default)
+    {
+        var isInRole = _currentUser.Roles.Contains(role);
+        return Task.FromResult(isInRole);
+    }
+}
+```
+
+### Handler Usage with Authorization
+
+```csharp
+[Authorize(Permissions.Students.Create)]
+public class RegisterStudentHandler : IHandler<RegisterStudentCommand, StudentDto>
+{
+    // ... handler implementation
+}
+
+[Authorize(Permissions.Students.View)]
+public class GetStudentHandler : IHandler<GetStudentQuery, StudentDto>
+{
+    // ... handler implementation
+}
+
+[Authorize(Permissions.Students.Delete)]
+public class DeleteStudentHandler : IHandler<DeleteStudentCommand>
+{
+    // ... handler implementation
+}
+```
+
+### DI Registration with Authorization
+
+```csharp
+// Application/DependencyInjection.cs
+public static class DependencyInjection
+{
+    public static IServiceCollection AddApplication(this IServiceCollection services)
+    {
+        // Register concrete handlers
+        services.AddScoped<RegisterStudentHandler>();
+        services.AddScoped<GetStudentHandler>();
+        services.AddScoped<DeleteStudentHandler>();
+
+        // Register authorized wrappers
+        services.AddScoped<IHandler<RegisterStudentCommand, StudentDto>>(sp =>
+            new AuthorizedHandler<RegisterStudentCommand, StudentDto>(
+                sp.GetRequiredService<RegisterStudentHandler>(),
+                sp.GetRequiredService<IAuthorizationService>()));
+
+        services.AddScoped<IHandler<GetStudentQuery, StudentDto>>(sp =>
+            new AuthorizedHandler<GetStudentQuery, StudentDto>(
+                sp.GetRequiredService<GetStudentHandler>(),
+                sp.GetRequiredService<IAuthorizationService>()));
+
+        services.AddScoped<IHandler<DeleteStudentCommand>>(sp =>
+            new AuthorizedHandler<DeleteStudentCommand>(
+                sp.GetRequiredService<DeleteStudentHandler>(),
+                sp.GetRequiredService<IAuthorizationService>()));
+
+        return services;
+    }
+}
+```
+
+```csharp
+// Infrastructure/DependencyInjection.cs (add to existing)
+services.AddHttpContextAccessor();
+services.AddScoped<ICurrentUser, CurrentUser>();
+services.AddScoped<IAuthorizationService, AuthorizationService>();
+```
+
+### Authorization Flow
+
+```
+Request → Controller → AuthorizedHandler → [Permission Check] → Handler → Result
+                                ↓
+                         Forbidden (403) if unauthorized
+```
+
+| Check Type | Attribute Example                 | Failure Result          |
+| ---------- | --------------------------------- | ----------------------- |
+| Permission | `[Authorize("students:create")]`  | `Result.Forbidden(...)` |
+| Role       | `[Authorize] { Role = "Admin" }`  | `Result.Forbidden(...)` |
+| Multiple   | Multiple `[Authorize]` attributes | All must pass           |
+| No Auth    | No `[Authorize]` attribute        | Passes through          |
+
+> Authorization is checked **before** the handler executes — fail fast, no wasted work.
+
+---
+
+## �🔄 Unit of Work
 
 ### Interface
 

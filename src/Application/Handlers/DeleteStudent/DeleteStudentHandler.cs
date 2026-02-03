@@ -5,6 +5,7 @@ using Domain.Interfaces;
 
 namespace Application.Handlers.DeleteStudent;
 
+[Authorize(Permissions.Students.Delete)]
 public class DeleteStudentHandler : IHandler<DeleteStudentCommand>
 {
     private readonly IStudentRepository _repository;

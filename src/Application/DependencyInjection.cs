@@ -11,12 +11,26 @@ public static class DependencyInjection
 {
     public static IServiceCollection AddApplication(this IServiceCollection services)
     {
-        // Handlers with return value
-        services.AddScoped<IHandler<RegisterStudentCommand, StudentDto>, RegisterStudentHandler>();
-        services.AddScoped<IHandler<GetStudentQuery, StudentDto>, GetStudentHandler>();
+        // Register concrete handlers
+        services.AddScoped<RegisterStudentHandler>();
+        services.AddScoped<GetStudentHandler>();
+        services.AddScoped<DeleteStudentHandler>();
 
-        // Handlers without return value
-        services.AddScoped<IHandler<DeleteStudentCommand>, DeleteStudentHandler>();
+        // Register authorized wrappers (decorator pattern)
+        services.AddScoped<IHandler<RegisterStudentCommand, StudentDto>>(sp =>
+            new AuthorizedHandler<RegisterStudentCommand, StudentDto>(
+                sp.GetRequiredService<RegisterStudentHandler>(),
+                sp.GetRequiredService<IAuthorizationService>()));
+
+        services.AddScoped<IHandler<GetStudentQuery, StudentDto>>(sp =>
+            new AuthorizedHandler<GetStudentQuery, StudentDto>(
+                sp.GetRequiredService<GetStudentHandler>(),
+                sp.GetRequiredService<IAuthorizationService>()));
+
+        services.AddScoped<IHandler<DeleteStudentCommand>>(sp =>
+            new AuthorizedHandler<DeleteStudentCommand>(
+                sp.GetRequiredService<DeleteStudentHandler>(),
+                sp.GetRequiredService<IAuthorizationService>()));
 
         return services;
     }

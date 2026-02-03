@@ -31,6 +31,11 @@ public static class DependencyInjection
         services.AddMemoryCache();
         services.AddSingleton<ICacheService, CacheService>();
 
+        // Authorization
+        services.AddHttpContextAccessor();
+        services.AddScoped<ICurrentUser, CurrentUser>();
+        services.AddScoped<IAuthorizationService, AuthorizationService>();
+
         return services;
     }
 }

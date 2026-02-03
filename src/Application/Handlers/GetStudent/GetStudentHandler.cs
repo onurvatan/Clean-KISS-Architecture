@@ -6,6 +6,7 @@ using Domain.Interfaces;
 
 namespace Application.Handlers.GetStudent;
 
+[Authorize(Permissions.Students.View)]
 public class GetStudentHandler : IHandler<GetStudentQuery, StudentDto>
 {
     private readonly IStudentRepository _repository;

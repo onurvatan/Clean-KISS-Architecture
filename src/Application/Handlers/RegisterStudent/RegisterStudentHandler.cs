@@ -8,6 +8,7 @@ using Domain.ValueObjects;
 
 namespace Application.Handlers.RegisterStudent;
 
+[Authorize(Permissions.Students.Create)]
 public class RegisterStudentHandler : IHandler<RegisterStudentCommand, StudentDto>
 {
     private readonly IStudentRepository _repository;
