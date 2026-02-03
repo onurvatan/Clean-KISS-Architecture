@@ -84,6 +84,7 @@ A simple, maintainable, domain-first architecture designed around clarity, testa
     /Middleware
       ExceptionMiddleware.cs
       IdempotencyMiddleware.cs
+      CorrelationIdMiddleware.cs
     /Extensions
       ResultExtensions.cs
     /Models
@@ -1290,6 +1291,186 @@ curl -X POST /api/students \
 | 4th POST | `X-Idempotency-Key: xyz` | 409 Conflict | Different key, duplicate detected  |
 
 > **Key insight**: True idempotency returns **identical responses** including status codes. Returning 409 on retry breaks client retry logic.
+
+---
+
+## 📝 Structured Logging (Serilog)
+
+Structured logging captures log data as queryable properties, not just text. Combined with correlation IDs, it enables request tracing across services.
+
+### Program.cs Configuration
+
+```csharp
+using Serilog;
+using Serilog.Events;
+
+// Bootstrap logger for startup errors
+Log.Logger = new LoggerConfiguration()
+    .MinimumLevel.Override("Microsoft", LogEventLevel.Information)
+    .Enrich.FromLogContext()
+    .WriteTo.Console()
+    .CreateBootstrapLogger();
+
+try
+{
+    Log.Information("Starting application");
+
+    var builder = WebApplication.CreateBuilder(args);
+
+    // Configure Serilog
+    builder.Host.UseSerilog((context, services, configuration) => configuration
+        .ReadFrom.Configuration(context.Configuration)
+        .ReadFrom.Services(services)
+        .Enrich.FromLogContext()
+        .Enrich.WithMachineName()
+        .Enrich.WithEnvironmentName()
+        .Enrich.WithProperty("Application", "CleanKissApi")
+        .WriteTo.Console(outputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj} {Properties:j}{NewLine}{Exception}")
+        .WriteTo.File(
+            path: "logs/log-.txt",
+            rollingInterval: RollingInterval.Day,
+            retainedFileCountLimit: 7,
+            outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {CorrelationId} {Message:lj}{NewLine}{Exception}"));
+
+    // ... rest of builder configuration
+
+    var app = builder.Build();
+
+    // Correlation ID (must be first to enrich all logs)
+    app.UseMiddleware<CorrelationIdMiddleware>();
+
+    // Request logging
+    app.UseSerilogRequestLogging(options =>
+    {
+        options.EnrichDiagnosticContext = (diagnosticContext, httpContext) =>
+        {
+            diagnosticContext.Set("RequestHost", httpContext.Request.Host.Value);
+            diagnosticContext.Set("UserAgent", httpContext.Request.Headers.UserAgent.ToString());
+            diagnosticContext.Set("ClientIp", httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown");
+        };
+    });
+
+    // ... rest of middleware
+
+    app.Run();
+}
+catch (Exception ex)
+{
+    Log.Fatal(ex, "Application terminated unexpectedly");
+}
+finally
+{
+    Log.CloseAndFlush();
+}
+```
+
+### Correlation ID Middleware
+
+```csharp
+// API/Middleware/CorrelationIdMiddleware.cs
+public sealed class CorrelationIdMiddleware
+{
+    private readonly RequestDelegate _next;
+    private const string CorrelationIdHeader = "X-Correlation-Id";
+
+    public CorrelationIdMiddleware(RequestDelegate next)
+    {
+        _next = next;
+    }
+
+    public async Task InvokeAsync(HttpContext context)
+    {
+        // Get or generate correlation ID
+        var correlationId = context.Request.Headers[CorrelationIdHeader].FirstOrDefault()
+            ?? Guid.NewGuid().ToString("N");
+
+        // Store in HttpContext for access throughout the request
+        context.Items["CorrelationId"] = correlationId;
+
+        // Add to response headers for client tracking
+        context.Response.OnStarting(() =>
+        {
+            context.Response.Headers[CorrelationIdHeader] = correlationId;
+            return Task.CompletedTask;
+        });
+
+        // Add to Serilog LogContext for structured logging
+        using (Serilog.Context.LogContext.PushProperty("CorrelationId", correlationId))
+        {
+            await _next(context);
+        }
+    }
+}
+```
+
+### Log Output Examples
+
+**Console (human-readable):**
+
+```
+[14:32:15 INF] HTTP GET /api/students/123 responded 200 in 45.2ms {"CorrelationId":"abc123","RequestHost":"localhost:5000"}
+[14:32:16 WRN] Validation error: Email is invalid | Method: POST | Path: /api/students {"CorrelationId":"def456"}
+```
+
+**File (machine-parseable):**
+
+```
+2026-02-03 14:32:15.123 +00:00 [INF] abc123 HTTP GET /api/students/123 responded 200 in 45.2ms
+2026-02-03 14:32:16.456 +00:00 [WRN] def456 Validation error: Email is invalid | Method: POST | Path: /api/students
+```
+
+### appsettings.json Configuration
+
+```json
+{
+  "Serilog": {
+    "MinimumLevel": {
+      "Default": "Information",
+      "Override": {
+        "Microsoft": "Warning",
+        "Microsoft.Hosting.Lifetime": "Information",
+        "System": "Warning"
+      }
+    }
+  }
+}
+```
+
+### Production Sinks
+
+For production, add sinks for centralized logging:
+
+```csharp
+// Seq (self-hosted)
+.WriteTo.Seq("http://seq-server:5341")
+
+// Azure Application Insights
+.WriteTo.ApplicationInsights(TelemetryConfiguration.Active, TelemetryConverter.Traces)
+
+// Elasticsearch
+.WriteTo.Elasticsearch(new ElasticsearchSinkOptions(new Uri("http://elastic:9200")))
+```
+
+### Correlation ID Flow
+
+```
+Client Request
+  ↓ X-Correlation-Id: abc123 (or generated)
+CorrelationIdMiddleware
+  ↓ Pushed to LogContext
+All Logs Include CorrelationId
+  ↓
+Response
+  ↓ X-Correlation-Id: abc123 (echoed back)
+Client
+```
+
+| Header             | Direction | Purpose                      |
+| ------------------ | --------- | ---------------------------- |
+| `X-Correlation-Id` | Request   | Client-provided or generated |
+| `X-Correlation-Id` | Response  | Echoed for client tracking   |
+
+> **Tip**: Pass `X-Correlation-Id` between microservices to trace requests across the entire system.
 
 ---
 

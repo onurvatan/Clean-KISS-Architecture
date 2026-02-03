@@ -22,15 +22,25 @@ public class ExceptionMiddleware
         catch (ArgumentException ex)
         {
             // Value object validation failures
-            _logger.LogWarning(ex, "Validation error for {Method} {Path}",
-                context.Request.Method, context.Request.Path);
+            _logger.LogWarning(ex,
+                "Validation error: {ErrorMessage} | Method: {Method} | Path: {Path} | QueryString: {QueryString}",
+                ex.Message,
+                context.Request.Method,
+                context.Request.Path,
+                context.Request.QueryString);
+
             await WriteResponseAsync(context, StatusCodes.Status400BadRequest, ex.Message);
         }
         catch (Exception ex)
         {
             // Unexpected errors
-            _logger.LogError(ex, "Unhandled exception for {Method} {Path}",
-                context.Request.Method, context.Request.Path);
+            _logger.LogError(ex,
+                "Unhandled exception: {ExceptionType} | Method: {Method} | Path: {Path} | QueryString: {QueryString}",
+                ex.GetType().Name,
+                context.Request.Method,
+                context.Request.Path,
+                context.Request.QueryString);
+
             await WriteResponseAsync(context, StatusCodes.Status500InternalServerError, "An unexpected error occurred");
         }
     }
