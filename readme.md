@@ -40,12 +40,16 @@ A simple, maintainable, domain-first architecture designed around clarity, testa
       /GetStudent
         GetStudentQuery.cs
         GetStudentHandler.cs
+      /DeleteStudent
+        DeleteStudentCommand.cs
+        DeleteStudentHandler.cs
     /Services
       IEmailService.cs
       IClock.cs
     /Abstractions
       IHandler.cs
       Result.cs
+      IUnitOfWork.cs
 
   /Infrastructure
     /Persistence
@@ -53,6 +57,7 @@ A simple, maintainable, domain-first architecture designed around clarity, testa
         AppDbContext.cs
         StudentConfiguration.cs
         CourseConfiguration.cs
+        UnitOfWork.cs
       /Repositories
         StudentRepository.cs
         CourseRepository.cs
@@ -66,6 +71,8 @@ A simple, maintainable, domain-first architecture designed around clarity, testa
       CoursesController.cs
     /Middleware
       ExceptionMiddleware.cs
+    /Extensions
+      ResultExtensions.cs
     /Models
       RegisterStudentRequest.cs
       StudentResponse.cs
@@ -95,6 +102,7 @@ A simple, maintainable, domain-first architecture designed around clarity, testa
 
 - EF Core DbContext
 - Repository implementations
+- Unit of Work implementation
 - External services (email, clock, etc.)
 
 ### 4. API is thin
@@ -119,6 +127,8 @@ This keeps validation **co-located with the data it protects** — no scattered 
 ---
 
 ## 📦 Result Pattern
+
+### Generic Result (with value)
 
 ```csharp
 public class Result<T>
@@ -155,6 +165,38 @@ public class Result<T>
 
     public static Result<T> Forbidden(string error)
         => new(default, error, 403);
+
+    // Pattern matching
+    public TResult Match<TResult>(Func<T, TResult> onSuccess, Func<string, TResult> onFailure)
+        => IsSuccess ? onSuccess(Value!) : onFailure(Error!);
+}
+```
+
+### Non-Generic Result (no value)
+
+```csharp
+public class Result
+{
+    public string? Error { get; }
+    public int StatusCode { get; }
+    public bool IsSuccess => Error is null;
+    public bool IsFailure => !IsSuccess;
+
+    private Result(string? error, int statusCode)
+    {
+        Error = error;
+        StatusCode = statusCode;
+    }
+
+    // Success
+    public static Result Success() => new(null, 200);
+    public static Result NoContent() => new(null, 204);
+
+    // Client errors
+    public static Result BadRequest(string error) => new(error, 400);
+    public static Result NotFound(string error) => new(error, 404);
+    public static Result Conflict(string error) => new(error, 409);
+    public static Result Forbidden(string error) => new(error, 403);
 }
 ```
 
@@ -167,11 +209,49 @@ No exceptions for expected failures. Clean, predictable control flow with built-
 ```csharp
 public interface IHandler<TRequest, TResponse>
 {
-    Task<Result<TResponse>> Handle(TRequest request);
+    Task<Result<TResponse>> Handle(TRequest request, CancellationToken cancellationToken = default);
+}
+
+// For handlers that don't return a value
+public interface IHandler<TRequest>
+{
+    Task<Result> Handle(TRequest request, CancellationToken cancellationToken = default);
 }
 ```
 
-Simple, generic, testable, and returns a result instead of throwing.
+Simple, generic, testable, with cancellation support.
+
+---
+
+## 🔄 Unit of Work
+
+### Interface
+
+```csharp
+// Application/Abstractions/IUnitOfWork.cs
+public interface IUnitOfWork
+{
+    Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
+}
+```
+
+### Implementation
+
+```csharp
+// Infrastructure/Persistence/EF/UnitOfWork.cs
+public class UnitOfWork : IUnitOfWork
+{
+    private readonly AppDbContext _context;
+
+    public UnitOfWork(AppDbContext context)
+    {
+        _context = context;
+    }
+
+    public Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+        => _context.SaveChangesAsync(cancellationToken);
+}
+```
 
 ---
 
@@ -201,22 +281,26 @@ The value object **protects its own invariants**. If it exists, it's valid.
 
 ---
 
-## 🧪 Example Handler (with business validation)
+## 🧪 Example Handlers
+
+### Handler with return value
 
 ```csharp
 public class RegisterStudentHandler : IHandler<RegisterStudentCommand, StudentDto>
 {
     private readonly IStudentRepository _repository;
+    private readonly IUnitOfWork _unitOfWork;
 
-    public RegisterStudentHandler(IStudentRepository repository)
+    public RegisterStudentHandler(IStudentRepository repository, IUnitOfWork unitOfWork)
     {
         _repository = repository;
+        _unitOfWork = unitOfWork;
     }
 
-    public async Task<Result<StudentDto>> Handle(RegisterStudentCommand command)
+    public async Task<Result<StudentDto>> Handle(RegisterStudentCommand command, CancellationToken cancellationToken = default)
     {
         // Business validation: check uniqueness
-        var exists = await _repository.ExistsByEmailAsync(command.Email);
+        var exists = await _repository.ExistsByEmailAsync(command.Email, cancellationToken);
         if (exists)
             return Result<StudentDto>.Conflict("A student with this email already exists");
 
@@ -224,16 +308,46 @@ public class RegisterStudentHandler : IHandler<RegisterStudentCommand, StudentDt
         var email = new Email(command.Email);
         var student = new Student(command.Name, email);
 
-        await _repository.AddAsync(student);
+        await _repository.AddAsync(student, cancellationToken);
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
 
         return Result<StudentDto>.Created(student.ToDto());
     }
 }
 ```
 
-- **Handler** checks business rules (email uniqueness)
-- **Value object** validates structure (email format)
+### Handler without return value
+
+```csharp
+public class DeleteStudentHandler : IHandler<DeleteStudentCommand>
+{
+    private readonly IStudentRepository _repository;
+    private readonly IUnitOfWork _unitOfWork;
+
+    public DeleteStudentHandler(IStudentRepository repository, IUnitOfWork unitOfWork)
+    {
+        _repository = repository;
+        _unitOfWork = unitOfWork;
+    }
+
+    public async Task<Result> Handle(DeleteStudentCommand command, CancellationToken cancellationToken = default)
+    {
+        var student = await _repository.GetByIdAsync(command.Id, cancellationToken);
+        if (student is null)
+            return Result.NotFound("Student not found");
+
+        await _repository.DeleteAsync(student, cancellationToken);
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+        return Result.NoContent();
+    }
+}
+```
+
+- **Handler** checks business rules
+- **Value object** validates structure
 - **Result** returns success or failure — no exception-driven flow
+- **UnitOfWork** explicitly saves changes
 
 ---
 
@@ -282,6 +396,27 @@ public static class ResultExtensions
             _ => controller.BadRequest(new { error = result.Error })
         };
     }
+
+    public static IActionResult ToActionResult(this Result result, ControllerBase controller)
+    {
+        if (result.IsSuccess)
+        {
+            return result.StatusCode switch
+            {
+                204 => controller.NoContent(),
+                _ => controller.Ok()
+            };
+        }
+
+        return result.StatusCode switch
+        {
+            400 => controller.BadRequest(new { error = result.Error }),
+            404 => controller.NotFound(new { error = result.Error }),
+            403 => controller.Forbid(),
+            409 => controller.Conflict(new { error = result.Error }),
+            _ => controller.BadRequest(new { error = result.Error })
+        };
+    }
 }
 ```
 
@@ -292,18 +427,30 @@ public static class ResultExtensions
 [Route("api/[controller]")]
 public class StudentsController : ControllerBase
 {
-    private readonly IHandler<RegisterStudentCommand, StudentDto> _handler;
+    private readonly IHandler<RegisterStudentCommand, StudentDto> _registerHandler;
+    private readonly IHandler<DeleteStudentCommand> _deleteHandler;
 
-    public StudentsController(IHandler<RegisterStudentCommand, StudentDto> handler)
+    public StudentsController(
+        IHandler<RegisterStudentCommand, StudentDto> registerHandler,
+        IHandler<DeleteStudentCommand> deleteHandler)
     {
-        _handler = handler;
+        _registerHandler = registerHandler;
+        _deleteHandler = deleteHandler;
     }
 
     [HttpPost]
-    public async Task<IActionResult> Register(RegisterStudentRequest request)
+    public async Task<IActionResult> Register(RegisterStudentRequest request, CancellationToken cancellationToken)
     {
         var command = new RegisterStudentCommand(request.Name, request.Email);
-        var result = await _handler.Handle(command);
+        var result = await _registerHandler.Handle(command, cancellationToken);
+        return result.ToActionResult(this);
+    }
+
+    [HttpDelete("{id}")]
+    public async Task<IActionResult> Delete(Guid id, CancellationToken cancellationToken)
+    {
+        var command = new DeleteStudentCommand(id);
+        var result = await _deleteHandler.Handle(command, cancellationToken);
         return result.ToActionResult(this);
     }
 }
@@ -336,13 +483,15 @@ public class ExceptionMiddleware
         catch (ArgumentException ex)
         {
             // Value object validation failures
-            _logger.LogWarning(ex, "Validation error");
+            _logger.LogWarning(ex, "Validation error for {Method} {Path}",
+                context.Request.Method, context.Request.Path);
             await WriteResponseAsync(context, StatusCodes.Status400BadRequest, ex.Message);
         }
         catch (Exception ex)
         {
             // Unexpected errors
-            _logger.LogError(ex, "Unhandled exception");
+            _logger.LogError(ex, "Unhandled exception for {Method} {Path}",
+                context.Request.Method, context.Request.Path);
             await WriteResponseAsync(context, StatusCodes.Status500InternalServerError, "An unexpected error occurred");
         }
     }
@@ -368,7 +517,7 @@ app.UseMiddleware<ExceptionMiddleware>();
 
 | Error Type              | Handled By                       | HTTP Status               |
 | ----------------------- | -------------------------------- | ------------------------- |
-| Business rule failure   | `Result<T>.Failure()`            | 400 Bad Request           |
+| Business rule failure   | `Result<T>.Failure()`            | 400/404/409 (as defined)  |
 | Value object validation | `ArgumentException` → Middleware | 400 Bad Request           |
 | Unexpected errors       | `Exception` → Middleware         | 500 Internal Server Error |
 
@@ -404,6 +553,9 @@ public static class DependencyInjection
         services.AddDbContext<AppDbContext>(options =>
             options.UseSqlServer(config.GetConnectionString("Default")));
 
+        // Unit of Work
+        services.AddScoped<IUnitOfWork, UnitOfWork>();
+
         // Repositories
         services.AddScoped<IStudentRepository, StudentRepository>();
         services.AddScoped<ICourseRepository, CourseRepository>();
@@ -425,9 +577,12 @@ public static class DependencyInjection
 {
     public static IServiceCollection AddApplication(this IServiceCollection services)
     {
-        // Register handlers
+        // Handlers with return value
         services.AddScoped<IHandler<RegisterStudentCommand, StudentDto>, RegisterStudentHandler>();
         services.AddScoped<IHandler<GetStudentQuery, StudentDto>, GetStudentHandler>();
+
+        // Handlers without return value
+        services.AddScoped<IHandler<DeleteStudentCommand>, DeleteStudentHandler>();
 
         return services;
     }
@@ -472,5 +627,7 @@ Clean, explicit wiring — no assembly scanning magic.
 - ✅ Validation is co-located, not scattered
 - ✅ No exception-driven control flow
 - ✅ Global exception handling as safety net
+- ✅ CancellationToken support throughout
+- ✅ Unit of Work for explicit transaction control
 
 > This is the architecture you build when you care about clarity, maintainability, and real-world productivity.
