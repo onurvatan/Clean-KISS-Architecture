@@ -1,11 +1,3 @@
-using API.Middleware;
-using Application;
-using HealthChecks.Redis;
-using Infrastructure;
-using Serilog;
-using Serilog.Events;
-using System.Threading.RateLimiting;
-
 // Bootstrap logger for startup errors
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Override("Microsoft", LogEventLevel.Information)
@@ -90,6 +82,18 @@ try
                 cancellationToken);
         };
     });
+
+    // OpenTelemetry distributed tracing
+    builder.Services.AddOpenTelemetry()
+        .ConfigureResource(resource => resource
+            .AddService(
+                serviceName: "CleanKissApi",
+                serviceVersion: typeof(Program).Assembly.GetName().Version?.ToString() ?? "1.0.0"))
+        .WithTracing(tracing => tracing
+            .AddAspNetCoreInstrumentation()
+            .AddHttpClientInstrumentation()
+            .AddSqlClientInstrumentation()
+            .AddConsoleExporter());
 
     // Health checks (non-dev environments only)
     var isProduction = !builder.Environment.IsDevelopment();

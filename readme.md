@@ -1832,6 +1832,140 @@ api-supported-versions: 2.0
 
 ---
 
+## 📡 OpenTelemetry (Distributed Tracing)
+
+OpenTelemetry provides vendor-neutral distributed tracing, enabling you to track requests across services and identify performance bottlenecks.
+
+### Configuration
+
+```csharp
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
+
+builder.Services.AddOpenTelemetry()
+    .ConfigureResource(resource => resource
+        .AddService(
+            serviceName: "CleanKissApi",
+            serviceVersion: typeof(Program).Assembly.GetName().Version?.ToString() ?? "1.0.0"))
+    .WithTracing(tracing => tracing
+        .AddAspNetCoreInstrumentation()
+        .AddHttpClientInstrumentation()
+        .AddSqlClientInstrumentation()
+        .AddConsoleExporter());
+```
+
+### Instrumentation Sources
+
+| Instrumentation | Traces                 | Use Case               |
+| --------------- | ---------------------- | ---------------------- |
+| ASP.NET Core    | Incoming HTTP requests | API endpoint latency   |
+| HttpClient      | Outgoing HTTP calls    | External service calls |
+| SqlClient       | Database queries       | Query performance      |
+| Custom          | Your business logic    | Handler execution time |
+
+### Production Exporters
+
+Replace `AddConsoleExporter()` with production backends:
+
+```csharp
+// Jaeger
+.AddJaegerExporter(options =>
+{
+    options.AgentHost = "jaeger";
+    options.AgentPort = 6831;
+})
+
+// OTLP (OpenTelemetry Protocol) - works with many backends
+.AddOtlpExporter(options =>
+{
+    options.Endpoint = new Uri("http://otel-collector:4317");
+})
+
+// Azure Monitor / Application Insights
+.AddAzureMonitorTraceExporter(options =>
+{
+    options.ConnectionString = builder.Configuration["ApplicationInsights:ConnectionString"];
+})
+
+// Zipkin
+.AddZipkinExporter(options =>
+{
+    options.Endpoint = new Uri("http://zipkin:9411/api/v2/spans");
+})
+```
+
+### Custom Spans
+
+Add custom tracing to handlers:
+
+```csharp
+using System.Diagnostics;
+
+public class RegisterStudentHandler : IHandler<RegisterStudentCommand, StudentDto>
+{
+    private static readonly ActivitySource ActivitySource = new("CleanKissApi.Handlers");
+
+    public async Task<Result<StudentDto>> Handle(RegisterStudentCommand command, CancellationToken ct)
+    {
+        using var activity = ActivitySource.StartActivity("RegisterStudent");
+        activity?.SetTag("student.email", command.Email);
+
+        // ... handler logic
+
+        activity?.SetTag("student.id", student.Id.ToString());
+        return Result<StudentDto>.Created(student.ToDto());
+    }
+}
+
+// Register the custom ActivitySource
+.WithTracing(tracing => tracing
+    .AddSource("CleanKissApi.Handlers")
+    // ... other instrumentation
+)
+```
+
+### Trace Context Propagation
+
+OpenTelemetry automatically propagates trace context via W3C Trace Context headers:
+
+```
+traceparent: 00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01
+tracestate: congo=t61rcWkgMzE
+```
+
+This enables end-to-end tracing across microservices.
+
+### Trace Output Example
+
+```
+Activity.TraceId:          0af7651916cd43dd8448eb211c80319c
+Activity.SpanId:           b7ad6b7169203331
+Activity.DisplayName:      GET /api/v1/students/123
+Activity.Kind:             Server
+Activity.StartTime:        2026-02-03T14:32:15.1234567Z
+Activity.Duration:         00:00:00.0452341
+Activity.Tags:
+    http.method: GET
+    http.url: https://localhost:5001/api/v1/students/123
+    http.status_code: 200
+    db.system: mssql
+    db.name: Students
+```
+
+### Benefits
+
+| Feature                  | Benefit                                |
+| ------------------------ | -------------------------------------- |
+| **Distributed Tracing**  | Track requests across services         |
+| **Performance Analysis** | Identify slow endpoints and queries    |
+| **Error Correlation**    | Link errors to specific request traces |
+| **Vendor Neutral**       | Switch backends without code changes   |
+| **Auto-instrumentation** | HTTP, SQL, gRPC traced automatically   |
+
+> **Tip**: Start with console exporter for development, then switch to Jaeger/OTLP for production visualization.
+
+---
+
 ## 🎯 Error Handling Strategy
 
 | Error Type              | Handled By                       | HTTP Status               |
