@@ -44,7 +44,8 @@ A simple, maintainable, domain-first architecture designed around clarity, testa
       IEmailService.cs
       IClock.cs
     /Abstractions
-      IHandler.cs  // generic handler interface for TDD
+      IHandler.cs
+      Result.cs
 
   /Infrastructure
     /Persistence
@@ -78,13 +79,15 @@ A simple, maintainable, domain-first architecture designed around clarity, testa
 - No DTOs
 - No API concerns
 - Only business rules, invariants, and value objects
+- **Value objects validate their own invariants** (format, structure, constraints)
 
 ### 2. Application orchestrates
 
 - Handlers implement `IHandler<TRequest, TResponse>`
-- Business validation lives here
+- **Business validation lives in handlers** (uniqueness, authorization, state checks)
 - Mapping done via extension methods
 - DTOs defined here
+- Returns `Result<T>` instead of throwing exceptions
 
 ### 3. Infrastructure handles persistence
 
@@ -96,25 +99,61 @@ A simple, maintainable, domain-first architecture designed around clarity, testa
 
 - Controllers only accept requests
 - Call handlers
-- Return responses
+- Map `Result<T>` to appropriate HTTP responses
 - No business logic
 
 ---
 
-## 🧩 Generic Handler Interface (for TDD)
+## 🎯 Validation Philosophy
+
+| Layer             | Validates             | Examples                                                |
+| ----------------- | --------------------- | ------------------------------------------------------- |
+| **Value Objects** | Structural invariants | Email format, Money non-negative, DateRange start < end |
+| **Handlers**      | Business rules        | Email uniqueness, user authorization, enrollment limits |
+
+This keeps validation **co-located with the data it protects** — no scattered validation logic.
+
+---
+
+## 📦 Result Pattern
+
+```csharp
+public class Result<T>
+{
+    public T? Value { get; }
+    public string? Error { get; }
+    public bool IsSuccess => Error is null;
+    public bool IsFailure => !IsSuccess;
+
+    private Result(T? value, string? error)
+    {
+        Value = value;
+        Error = error;
+    }
+
+    public static Result<T> Success(T value) => new(value, null);
+    public static Result<T> Failure(string error) => new(default, error);
+}
+```
+
+No exceptions for expected failures. Clean, predictable control flow.
+
+---
+
+## 🧩 Generic Handler Interface
 
 ```csharp
 public interface IHandler<TRequest, TResponse>
 {
-    Task<TResponse> Handle(TRequest request);
+    Task<Result<TResponse>> Handle(TRequest request);
 }
 ```
 
-Simple, generic, and perfect for testing.
+Simple, generic, testable, and returns a result instead of throwing.
 
 ---
 
-## 🧪 Example Value Object
+## 🧪 Example Value Object (with self-validation)
 
 ```csharp
 public sealed class Email
@@ -136,6 +175,44 @@ public sealed class Email
 }
 ```
 
+The value object **protects its own invariants**. If it exists, it's valid.
+
+---
+
+## 🧪 Example Handler (with business validation)
+
+```csharp
+public class RegisterStudentHandler : IHandler<RegisterStudentCommand, StudentDto>
+{
+    private readonly IStudentRepository _repository;
+
+    public RegisterStudentHandler(IStudentRepository repository)
+    {
+        _repository = repository;
+    }
+
+    public async Task<Result<StudentDto>> Handle(RegisterStudentCommand command)
+    {
+        // Business validation: check uniqueness
+        var exists = await _repository.ExistsByEmailAsync(command.Email);
+        if (exists)
+            return Result<StudentDto>.Failure("A student with this email already exists");
+
+        // Value object validates format (throws if invalid)
+        var email = new Email(command.Email);
+        var student = new Student(command.Name, email);
+
+        await _repository.AddAsync(student);
+
+        return Result<StudentDto>.Success(student.ToDto());
+    }
+}
+```
+
+- **Handler** checks business rules (email uniqueness)
+- **Value object** validates structure (email format)
+- **Result** returns success or failure — no exception-driven flow
+
 ---
 
 ## 🔄 Mapping via Extensions
@@ -154,6 +231,38 @@ public static class StudentExtensions
 
 ---
 
+## 🌐 API Result Handling
+
+```csharp
+[ApiController]
+[Route("api/[controller]")]
+public class StudentsController : ControllerBase
+{
+    private readonly IHandler<RegisterStudentCommand, StudentDto> _handler;
+
+    public StudentsController(IHandler<RegisterStudentCommand, StudentDto> handler)
+    {
+        _handler = handler;
+    }
+
+    [HttpPost]
+    public async Task<IActionResult> Register(RegisterStudentRequest request)
+    {
+        var command = new RegisterStudentCommand(request.Name, request.Email);
+        var result = await _handler.Handle(command);
+
+        if (result.IsFailure)
+            return BadRequest(new { error = result.Error });
+
+        return Ok(result.Value);
+    }
+}
+```
+
+Clean mapping from `Result<T>` to HTTP status codes.
+
+---
+
 ## 🧠 Why This Architecture Works
 
 - ✅ Easy to debug locally
@@ -165,5 +274,7 @@ public static class StudentExtensions
 - ✅ Domain stays pure
 - ✅ Handlers stay small
 - ✅ API stays thin
+- ✅ Validation is co-located, not scattered
+- ✅ No exception-driven control flow
 
 > This is the architecture you build when you care about clarity, maintainability, and real-world productivity.
