@@ -2019,10 +2019,14 @@ builder.Services.AddOptions<DatabaseSettings>()
     .ValidateDataAnnotations()
     .ValidateOnStart();
 
-builder.Services.AddOptions<JwtSettings>()
-    .BindConfiguration(JwtSettings.SectionName)
-    .ValidateDataAnnotations()
-    .ValidateOnStart();
+// JWT validation only in production (optional in development)
+if (!builder.Environment.IsDevelopment())
+{
+    builder.Services.AddOptions<JwtSettings>()
+        .BindConfiguration(JwtSettings.SectionName)
+        .ValidateDataAnnotations()
+        .ValidateOnStart();
+}
 ```
 
 ### appsettings.json Example

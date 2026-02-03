@@ -26,10 +26,14 @@ try
         .ValidateDataAnnotations()
         .ValidateOnStart();
 
-    builder.Services.AddOptions<Application.Settings.JwtSettings>()
-        .BindConfiguration(Application.Settings.JwtSettings.SectionName)
-        .ValidateDataAnnotations()
-        .ValidateOnStart();
+    // JWT validation only in production (optional in development)
+    if (!builder.Environment.IsDevelopment())
+    {
+        builder.Services.AddOptions<Application.Settings.JwtSettings>()
+            .BindConfiguration(Application.Settings.JwtSettings.SectionName)
+            .ValidateDataAnnotations()
+            .ValidateOnStart();
+    }
 
     // Configure Serilog
     builder.Host.UseSerilog((context, services, configuration) => configuration
