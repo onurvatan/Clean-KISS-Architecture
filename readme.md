@@ -64,6 +64,8 @@ A simple, maintainable, domain-first architecture designed around clarity, testa
     /Controllers
       StudentsController.cs
       CoursesController.cs
+    /Middleware
+      ExceptionMiddleware.cs
     /Models
       RegisterStudentRequest.cs
       StudentResponse.cs
@@ -100,6 +102,7 @@ A simple, maintainable, domain-first architecture designed around clarity, testa
 - Controllers only accept requests
 - Call handlers
 - Map `Result<T>` to appropriate HTTP responses
+- Global exception middleware as safety net
 - No business logic
 
 ---
@@ -263,6 +266,71 @@ Clean mapping from `Result<T>` to HTTP status codes.
 
 ---
 
+## 🛡️ Global Exception Middleware
+
+```csharp
+public class ExceptionMiddleware
+{
+    private readonly RequestDelegate _next;
+    private readonly ILogger<ExceptionMiddleware> _logger;
+
+    public ExceptionMiddleware(RequestDelegate next, ILogger<ExceptionMiddleware> logger)
+    {
+        _next = next;
+        _logger = logger;
+    }
+
+    public async Task InvokeAsync(HttpContext context)
+    {
+        try
+        {
+            await _next(context);
+        }
+        catch (ArgumentException ex)
+        {
+            // Value object validation failures
+            _logger.LogWarning(ex, "Validation error");
+            await WriteResponseAsync(context, StatusCodes.Status400BadRequest, ex.Message);
+        }
+        catch (Exception ex)
+        {
+            // Unexpected errors
+            _logger.LogError(ex, "Unhandled exception");
+            await WriteResponseAsync(context, StatusCodes.Status500InternalServerError, "An unexpected error occurred");
+        }
+    }
+
+    private static async Task WriteResponseAsync(HttpContext context, int statusCode, string message)
+    {
+        context.Response.StatusCode = statusCode;
+        context.Response.ContentType = "application/json";
+        await context.Response.WriteAsJsonAsync(new { error = message });
+    }
+}
+```
+
+Register in `Program.cs`:
+
+```csharp
+app.UseMiddleware<ExceptionMiddleware>();
+```
+
+---
+
+## 🎯 Error Handling Strategy
+
+| Error Type              | Handled By                       | HTTP Status               |
+| ----------------------- | -------------------------------- | ------------------------- |
+| Business rule failure   | `Result<T>.Failure()`            | 400 Bad Request           |
+| Value object validation | `ArgumentException` → Middleware | 400 Bad Request           |
+| Unexpected errors       | `Exception` → Middleware         | 500 Internal Server Error |
+
+- **Expected failures** → Use `Result<T>` (no exceptions)
+- **Invalid value objects** → Caught by middleware (fail-fast)
+- **Unexpected errors** → Logged and return generic message (no stack trace leak)
+
+---
+
 ## 🧠 Why This Architecture Works
 
 - ✅ Easy to debug locally
@@ -276,5 +344,6 @@ Clean mapping from `Result<T>` to HTTP status codes.
 - ✅ API stays thin
 - ✅ Validation is co-located, not scattered
 - ✅ No exception-driven control flow
+- ✅ Global exception handling as safety net
 
 > This is the architecture you build when you care about clarity, maintainability, and real-world productivity.
