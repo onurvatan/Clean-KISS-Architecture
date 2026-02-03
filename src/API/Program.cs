@@ -1,5 +1,6 @@
 using API.Middleware;
 using Application;
+using HealthChecks.Redis;
 using Infrastructure;
 using Serilog;
 using Serilog.Events;
@@ -39,6 +40,28 @@ try
     builder.Services.AddControllers();
     builder.Services.AddOpenApi();
 
+    // Health checks (non-dev environments only)
+    var isProduction = !builder.Environment.IsDevelopment();
+
+    if (isProduction)
+    {
+        var healthChecks = builder.Services.AddHealthChecks();
+
+        // SQL Server health check (if configured)
+        var sqlConnection = builder.Configuration.GetConnectionString("Default");
+        if (!string.IsNullOrEmpty(sqlConnection))
+        {
+            healthChecks.AddSqlServer(sqlConnection, name: "sqlserver", tags: ["db", "ready"]);
+        }
+
+        // Redis health check (if configured)
+        var redisConnection = builder.Configuration.GetConnectionString("Redis");
+        if (!string.IsNullOrEmpty(redisConnection))
+        {
+            healthChecks.AddRedis(redisConnection, name: "redis", tags: ["cache", "ready"]);
+        }
+    }
+
     var app = builder.Build();
 
     // Configure the HTTP request pipeline.
@@ -75,6 +98,37 @@ try
     app.UseAuthorization();
 
     app.MapControllers();
+
+    // Health check endpoints (non-dev only)
+    if (isProduction)
+    {
+        app.MapHealthChecks("/health/live", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
+        {
+            Predicate = _ => false // No checks, just confirms app is running
+        });
+
+        app.MapHealthChecks("/health/ready", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
+        {
+            Predicate = check => check.Tags.Contains("ready"),
+            ResponseWriter = async (context, report) =>
+            {
+                context.Response.ContentType = "application/json";
+                var result = new
+                {
+                    status = report.Status.ToString(),
+                    checks = report.Entries.Select(e => new
+                    {
+                        name = e.Key,
+                        status = e.Value.Status.ToString(),
+                        duration = e.Value.Duration.TotalMilliseconds,
+                        exception = e.Value.Exception?.Message
+                    }),
+                    totalDuration = report.TotalDuration.TotalMilliseconds
+                };
+                await context.Response.WriteAsJsonAsync(result);
+            }
+        });
+    }
 
     app.Run();
 }

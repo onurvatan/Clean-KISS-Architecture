@@ -1474,7 +1474,163 @@ Client
 
 ---
 
-## 🎯 Error Handling Strategy
+## � Health Checks
+
+Health checks are essential for container orchestrators (Kubernetes), load balancers, and monitoring systems to determine if your application is healthy and ready to receive traffic.
+
+### Two Endpoints
+
+| Endpoint        | Purpose                                 | Checks                   |
+| --------------- | --------------------------------------- | ------------------------ |
+| `/health/live`  | **Liveness** - Is the app running?      | None (just responds 200) |
+| `/health/ready` | **Readiness** - Can it handle requests? | Database, Redis, etc.    |
+
+### Configuration in Program.cs
+
+```csharp
+// Health checks
+var healthChecks = builder.Services.AddHealthChecks();
+
+// SQL Server health check
+var sqlConnection = builder.Configuration.GetConnectionString("Default");
+if (!string.IsNullOrEmpty(sqlConnection))
+{
+    healthChecks.AddSqlServer(sqlConnection, name: "sqlserver", tags: ["db", "ready"]);
+}
+
+// Redis health check (if configured)
+var redisConnection = builder.Configuration.GetConnectionString("Redis");
+if (!string.IsNullOrEmpty(redisConnection))
+{
+    healthChecks.AddRedis(redisConnection, name: "redis", tags: ["cache", "ready"]);
+}
+```
+
+### Endpoint Mapping
+
+```csharp
+// Liveness - just confirms app is running
+app.MapHealthChecks("/health/live", new HealthCheckOptions
+{
+    Predicate = _ => false // No dependency checks
+});
+
+// Readiness - checks all dependencies tagged "ready"
+app.MapHealthChecks("/health/ready", new HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("ready"),
+    ResponseWriter = async (context, report) =>
+    {
+        context.Response.ContentType = "application/json";
+        var result = new
+        {
+            status = report.Status.ToString(),
+            checks = report.Entries.Select(e => new
+            {
+                name = e.Key,
+                status = e.Value.Status.ToString(),
+                duration = e.Value.Duration.TotalMilliseconds,
+                exception = e.Value.Exception?.Message
+            }),
+            totalDuration = report.TotalDuration.TotalMilliseconds
+        };
+        await context.Response.WriteAsJsonAsync(result);
+    }
+});
+```
+
+### Response Examples
+
+**Liveness (GET /health/live):**
+
+```
+HTTP 200 OK
+Healthy
+```
+
+**Readiness (GET /health/ready):**
+
+```json
+{
+  "status": "Healthy",
+  "checks": [
+    {
+      "name": "sqlserver",
+      "status": "Healthy",
+      "duration": 12.5,
+      "exception": null
+    },
+    {
+      "name": "redis",
+      "status": "Healthy",
+      "duration": 3.2,
+      "exception": null
+    }
+  ],
+  "totalDuration": 15.7
+}
+```
+
+**Unhealthy Response:**
+
+```json
+{
+  "status": "Unhealthy",
+  "checks": [
+    {
+      "name": "sqlserver",
+      "status": "Unhealthy",
+      "duration": 5001.2,
+      "exception": "Connection timeout"
+    }
+  ],
+  "totalDuration": 5001.2
+}
+```
+
+### Kubernetes Configuration
+
+```yaml
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: api
+      livenessProbe:
+        httpGet:
+          path: /health/live
+          port: 80
+        initialDelaySeconds: 5
+        periodSeconds: 10
+      readinessProbe:
+        httpGet:
+          path: /health/ready
+          port: 80
+        initialDelaySeconds: 10
+        periodSeconds: 5
+```
+
+### Health Check Flow
+
+```
+Kubernetes/Load Balancer
+  ↓
+/health/live → App running? → 200 OK (keep pod alive)
+  ↓
+/health/ready → Dependencies OK? → 200 OK (route traffic)
+                                 → 503 (stop routing traffic)
+```
+
+| Probe         | Failure Action            | Use Case                   |
+| ------------- | ------------------------- | -------------------------- |
+| **Liveness**  | Restart container         | App deadlocked/frozen      |
+| **Readiness** | Remove from load balancer | DB down, still starting up |
+
+> **Key insight**: Liveness should be cheap (no I/O). Readiness can check dependencies.
+
+---
+
+## �🎯 Error Handling Strategy
 
 | Error Type              | Handled By                       | HTTP Status               |
 | ----------------------- | -------------------------------- | ------------------------- |
