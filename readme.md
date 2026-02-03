@@ -168,6 +168,9 @@ public class Result<T>
     public static Result<T> Forbidden(string error)
         => new(default, error, 403);
 
+    public static Result<T> Unauthorized(string error)
+        => new(default, error, 401);
+
     // Pattern matching
     public TResult Match<TResult>(Func<T, TResult> onSuccess, Func<string, TResult> onFailure)
         => IsSuccess ? onSuccess(Value!) : onFailure(Error!);
@@ -199,6 +202,7 @@ public class Result
     public static Result NotFound(string error) => new(error, 404);
     public static Result Conflict(string error) => new(error, 409);
     public static Result Forbidden(string error) => new(error, 403);
+    public static Result Unauthorized(string error) => new(error, 401);
 }
 ```
 
@@ -268,7 +272,7 @@ public interface ICacheService
     Task<T?> GetAsync<T>(string key, CancellationToken cancellationToken = default);
     Task SetAsync<T>(string key, T value, TimeSpan? expiration = null, CancellationToken cancellationToken = default);
     Task RemoveAsync(string key, CancellationToken cancellationToken = default);
-    Task<T> GetOrCreateAsync<T>(string key, Func<Task<T>> factory, TimeSpan? expiration = null, CancellationToken cancellationToken = default);
+    Task<T?> GetOrCreateAsync<T>(string key, Func<Task<T?>> factory, TimeSpan? expiration = null, CancellationToken cancellationToken = default);
 }
 ```
 
@@ -308,13 +312,16 @@ public class CacheService : ICacheService
         return Task.CompletedTask;
     }
 
-    public async Task<T> GetOrCreateAsync<T>(string key, Func<Task<T>> factory, TimeSpan? expiration = null, CancellationToken cancellationToken = default)
+    public async Task<T?> GetOrCreateAsync<T>(string key, Func<Task<T?>> factory, TimeSpan? expiration = null, CancellationToken cancellationToken = default)
     {
         if (_cache.TryGetValue(key, out T? value) && value is not null)
             return value;
 
         value = await factory();
-        await SetAsync(key, value, expiration, cancellationToken);
+
+        if (value is not null)
+            await SetAsync(key, value, expiration, cancellationToken);
+
         return value;
     }
 }
@@ -353,14 +360,17 @@ public class RedisCacheService : ICacheService
     public Task RemoveAsync(string key, CancellationToken cancellationToken = default)
         => _cache.RemoveAsync(key, cancellationToken);
 
-    public async Task<T> GetOrCreateAsync<T>(string key, Func<Task<T>> factory, TimeSpan? expiration = null, CancellationToken cancellationToken = default)
+    public async Task<T?> GetOrCreateAsync<T>(string key, Func<Task<T?>> factory, TimeSpan? expiration = null, CancellationToken cancellationToken = default)
     {
         var cached = await GetAsync<T>(key, cancellationToken);
         if (cached is not null)
             return cached;
 
         var value = await factory();
-        await SetAsync(key, value, expiration, cancellationToken);
+
+        if (value is not null)
+            await SetAsync(key, value, expiration, cancellationToken);
+
         return value;
     }
 }
@@ -420,7 +430,7 @@ public class RegisterStudentHandler : IHandler<RegisterStudentCommand, StudentDt
     private readonly ICacheService _cache;
 
     public RegisterStudentHandler(
-        IStudentRepository repository, 
+        IStudentRepository repository,
         IUnitOfWork unitOfWork,
         ICacheService cache)
     {
@@ -451,12 +461,12 @@ public class RegisterStudentHandler : IHandler<RegisterStudentCommand, StudentDt
 
 ### Caching Strategy
 
-| Operation | Cache Action | Why |
-|-----------|--------------|-----|
-| **Query (Get)** | Cache result | Reduce database hits |
-| **Create** | Invalidate list cache | List is now stale |
-| **Update** | Invalidate item + list cache | Both are stale |
-| **Delete** | Invalidate item + list cache | Both are stale |
+| Operation       | Cache Action                 | Why                  |
+| --------------- | ---------------------------- | -------------------- |
+| **Query (Get)** | Cache result                 | Reduce database hits |
+| **Create**      | Invalidate list cache        | List is now stale    |
+| **Update**      | Invalidate item + list cache | Both are stale       |
+| **Delete**      | Invalidate item + list cache | Both are stale       |
 
 > Cache in **query handlers**, invalidate in **command handlers**.
 
@@ -582,13 +592,15 @@ public static class StudentExtensions
 // API/Extensions/ResultExtensions.cs
 public static class ResultExtensions
 {
-    public static IActionResult ToActionResult<T>(this Result<T> result, ControllerBase controller)
+    public static IActionResult ToActionResult<T>(this Result<T> result, ControllerBase controller, string? actionName = null, Func<T, object>? routeValues = null)
     {
         if (result.IsSuccess)
         {
             return result.StatusCode switch
             {
-                201 => controller.CreatedAtAction(null, result.Value),
+                201 when actionName is not null && routeValues is not null
+                    => controller.CreatedAtAction(actionName, routeValues(result.Value!), result.Value),
+                201 => controller.StatusCode(201, result.Value),
                 204 => controller.NoContent(),
                 _ => controller.Ok(result.Value)
             };
@@ -597,6 +609,7 @@ public static class ResultExtensions
         return result.StatusCode switch
         {
             400 => controller.BadRequest(new { error = result.Error }),
+            401 => controller.Unauthorized(new { error = result.Error }),
             404 => controller.NotFound(new { error = result.Error }),
             403 => controller.Forbid(),
             409 => controller.Conflict(new { error = result.Error }),
@@ -618,6 +631,7 @@ public static class ResultExtensions
         return result.StatusCode switch
         {
             400 => controller.BadRequest(new { error = result.Error }),
+            401 => controller.Unauthorized(new { error = result.Error }),
             404 => controller.NotFound(new { error = result.Error }),
             403 => controller.Forbid(),
             409 => controller.Conflict(new { error = result.Error }),
@@ -635,14 +649,25 @@ public static class ResultExtensions
 public class StudentsController : ControllerBase
 {
     private readonly IHandler<RegisterStudentCommand, StudentDto> _registerHandler;
+    private readonly IHandler<GetStudentQuery, StudentDto> _getHandler;
     private readonly IHandler<DeleteStudentCommand> _deleteHandler;
 
     public StudentsController(
         IHandler<RegisterStudentCommand, StudentDto> registerHandler,
+        IHandler<GetStudentQuery, StudentDto> getHandler,
         IHandler<DeleteStudentCommand> deleteHandler)
     {
         _registerHandler = registerHandler;
+        _getHandler = getHandler;
         _deleteHandler = deleteHandler;
+    }
+
+    [HttpGet("{id}", Name = nameof(GetById))]
+    public async Task<IActionResult> GetById(Guid id, CancellationToken cancellationToken)
+    {
+        var query = new GetStudentQuery(id);
+        var result = await _getHandler.Handle(query, cancellationToken);
+        return result.ToActionResult(this);
     }
 
     [HttpPost]
@@ -650,7 +675,7 @@ public class StudentsController : ControllerBase
     {
         var command = new RegisterStudentCommand(request.Name, request.Email);
         var result = await _registerHandler.Handle(command, cancellationToken);
-        return result.ToActionResult(this);
+        return result.ToActionResult(this, nameof(GetById), dto => new { id = dto.Id });
     }
 
     [HttpDelete("{id}")]
