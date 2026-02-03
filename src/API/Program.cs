@@ -1,10 +1,3 @@
-using API.Middleware;
-using Application;
-using HealthChecks.Redis;
-using Infrastructure;
-using Serilog;
-using Serilog.Events;
-
 // Bootstrap logger for startup errors
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Override("Microsoft", LogEventLevel.Information)
@@ -39,6 +32,45 @@ try
 
     builder.Services.AddControllers();
     builder.Services.AddOpenApi();
+
+    // Rate limiting
+    builder.Services.AddRateLimiter(options =>
+    {
+        options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+        // Global fixed window limiter (100 requests per minute per IP)
+        options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
+        {
+            var clientIp = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+            return RateLimitPartition.GetFixedWindowLimiter(clientIp, _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 100,
+                Window = TimeSpan.FromMinutes(1),
+                QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                QueueLimit = 0
+            });
+        });
+
+        // Named policy for stricter endpoints (e.g., auth, registration)
+        options.AddPolicy("strict", context =>
+            RateLimitPartition.GetFixedWindowLimiter(
+                context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = 10,
+                    Window = TimeSpan.FromMinutes(1),
+                    QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                    QueueLimit = 0
+                }));
+
+        options.OnRejected = async (context, cancellationToken) =>
+        {
+            context.HttpContext.Response.ContentType = "application/json";
+            await context.HttpContext.Response.WriteAsJsonAsync(
+                new { error = "Too many requests. Please try again later." },
+                cancellationToken);
+        };
+    });
 
     // Health checks (non-dev environments only)
     var isProduction = !builder.Environment.IsDevelopment();
@@ -89,6 +121,9 @@ try
 
     // Global exception handling
     app.UseMiddleware<ExceptionMiddleware>();
+
+    // Rate limiting
+    app.UseRateLimiter();
 
     // Idempotency for POST/PUT/PATCH/DELETE
     app.UseMiddleware<IdempotencyMiddleware>();

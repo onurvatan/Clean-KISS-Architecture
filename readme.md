@@ -1630,7 +1630,107 @@ Kubernetes/Load Balancer
 
 ---
 
-## �🎯 Error Handling Strategy
+## 🚦 Rate Limiting
+
+Rate limiting protects your API from abuse, DDoS attacks, and runaway clients. Built into .NET with zero external dependencies.
+
+### Configuration
+
+```csharp
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+    // Global: 100 requests per minute per IP
+    options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
+    {
+        var clientIp = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        return RateLimitPartition.GetFixedWindowLimiter(clientIp, _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = 100,
+            Window = TimeSpan.FromMinutes(1),
+            QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+            QueueLimit = 0
+        });
+    });
+
+    // Strict policy: 10 requests per minute (for sensitive endpoints)
+    options.AddPolicy("strict", context =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 10,
+                Window = TimeSpan.FromMinutes(1),
+                QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                QueueLimit = 0
+            }));
+
+    options.OnRejected = async (context, cancellationToken) =>
+    {
+        context.HttpContext.Response.ContentType = "application/json";
+        await context.HttpContext.Response.WriteAsJsonAsync(
+            new { error = "Too many requests. Please try again later." },
+            cancellationToken);
+    };
+});
+```
+
+### Middleware Registration
+
+```csharp
+app.UseRateLimiter();
+```
+
+### Applying Strict Policy to Endpoints
+
+```csharp
+// On a controller
+[EnableRateLimiting("strict")]
+public class AuthController : ControllerBase { }
+
+// On a specific action
+[HttpPost]
+[EnableRateLimiting("strict")]
+public async Task<IActionResult> Register(...) { }
+
+// Disable rate limiting for specific endpoints
+[DisableRateLimiting]
+public async Task<IActionResult> HealthCheck() { }
+```
+
+### Rate Limit Policies
+
+| Policy   | Limit   | Window | Use Case                            |
+| -------- | ------- | ------ | ----------------------------------- |
+| Global   | 100 req | 1 min  | All endpoints by default            |
+| `strict` | 10 req  | 1 min  | Login, registration, password reset |
+
+### Response on Limit Exceeded
+
+```
+HTTP 429 Too Many Requests
+Content-Type: application/json
+
+{
+  "error": "Too many requests. Please try again later."
+}
+```
+
+### Algorithm Options
+
+| Algorithm          | Behavior                   | Use Case                     |
+| ------------------ | -------------------------- | ---------------------------- |
+| **Fixed Window**   | Resets at fixed intervals  | Simple, predictable          |
+| **Sliding Window** | Rolling window             | Smoother distribution        |
+| **Token Bucket**   | Tokens replenish over time | Allows bursts                |
+| **Concurrency**    | Limits concurrent requests | Protect expensive operations |
+
+> **Tip**: Start with Fixed Window. Only switch if you have specific burst or smoothing requirements.
+
+---
+
+## 🎯 Error Handling Strategy
 
 | Error Type              | Handled By                       | HTTP Status               |
 | ----------------------- | -------------------------------- | ------------------------- |
