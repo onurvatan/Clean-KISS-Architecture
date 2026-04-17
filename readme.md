@@ -281,6 +281,124 @@ One-liner result handling via `ToActionResult()` extension.
 
 ---
 
+## 🚀 Example Usage
+
+Run the API:
+
+```bash
+dotnet run --project src/API/API.csproj
+```
+
+Open Swagger UI in development:
+
+```text
+https://localhost:5001/swagger
+```
+
+The API expects a JWT bearer token. The current authorization layer reads:
+
+- user id from `ClaimTypes.NameIdentifier`
+- roles from `ClaimTypes.Role`
+- permissions from the `"permission"` claim
+
+Minimum permission claims by endpoint:
+
+| Endpoint                         | Permission Claim     |
+| -------------------------------- | -------------------- |
+| `GET /api/v1/students/{id}`      | `students:view`      |
+| `POST /api/v1/students`          | `students:create`    |
+| `DELETE /api/v1/students/{id}`   | `students:delete`    |
+
+Swagger usage:
+
+1. Open `/swagger`
+2. Click `Authorize`
+3. Paste `Bearer <your-jwt>`
+4. Call the endpoint
+
+Anonymous request example:
+
+```bash
+curl -X POST "https://localhost:5001/api/v1/students" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"John Doe","email":"john@example.com"}'
+```
+
+Expected response:
+
+```http
+HTTP/1.1 403 Forbidden
+```
+
+Example create request:
+
+```bash
+curl -X POST "https://localhost:5001/api/v1/students" \
+  -H "Authorization: Bearer <your-jwt>" \
+  -H "Content-Type: application/json" \
+  -H "X-Idempotency-Key: student-create-001" \
+  -d '{"name":"John Doe","email":"john@example.com"}'
+```
+
+Example response:
+
+```json
+{
+  "id": "7d7ff878-c633-4d65-b5af-f4b2cdde94a4",
+  "name": "John Doe",
+  "email": "john@example.com",
+  "createdAt": "2026-04-17T11:45:00Z"
+}
+```
+
+Fetch the student:
+
+```bash
+curl "https://localhost:5001/api/v1/students/7d7ff878-c633-4d65-b5af-f4b2cdde94a4" \
+  -H "Authorization: Bearer <your-jwt>"
+```
+
+Anonymous read request example:
+
+```bash
+curl "https://localhost:5001/api/v1/students/7d7ff878-c633-4d65-b5af-f4b2cdde94a4"
+```
+
+Expected response:
+
+```http
+HTTP/1.1 403 Forbidden
+```
+
+Delete the student:
+
+```bash
+curl -X DELETE "https://localhost:5001/api/v1/students/7d7ff878-c633-4d65-b5af-f4b2cdde94a4" \
+  -H "Authorization: Bearer <your-jwt>" \
+  -H "X-Idempotency-Key: student-delete-001"
+```
+
+Example JWT payload for local development:
+
+```json
+{
+  "sub": "dev-user-1",
+  "email": "dev@example.com",
+  "role": "admin",
+  "permission": [
+    "students:view",
+    "students:create",
+    "students:delete"
+  ],
+  "iss": "CleanKissApi",
+  "aud": "CleanKissApi"
+}
+```
+
+The token must be signed with the `Jwt:Secret` value from `src/API/appsettings.json`.
+
+---
+
 ## 🔐 Authorization Layer
 
 Authorization is checked **before** handlers execute using a decorator pattern.

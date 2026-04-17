@@ -1,10 +1,15 @@
 using API.Middleware;
 using Application;
+using Application.Settings;
 using Infrastructure;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.IdentityModel.Tokens;
+using Microsoft.OpenApi;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
 using Serilog;
 using Serilog.Events;
+using System.Text;
 using System.Threading.RateLimiting;
 
 // Bootstrap logger for startup errors
@@ -19,18 +24,20 @@ try
     Log.Information("Starting application");
 
     var builder = WebApplication.CreateBuilder(args);
+    var jwtSettings = builder.Configuration.GetSection(JwtSettings.SectionName).Get<JwtSettings>()
+        ?? throw new InvalidOperationException("JWT settings are required");
 
     // Configuration validation (fail fast on missing required settings)
-    builder.Services.AddOptions<Application.Settings.DatabaseSettings>()
-        .BindConfiguration(Application.Settings.DatabaseSettings.SectionName)
+    builder.Services.AddOptions<DatabaseSettings>()
+        .BindConfiguration(DatabaseSettings.SectionName)
         .ValidateDataAnnotations()
         .ValidateOnStart();
 
     // JWT validation only in production (optional in development)
     if (!builder.Environment.IsDevelopment())
     {
-        builder.Services.AddOptions<Application.Settings.JwtSettings>()
-            .BindConfiguration(Application.Settings.JwtSettings.SectionName)
+        builder.Services.AddOptions<JwtSettings>()
+            .BindConfiguration(JwtSettings.SectionName)
             .ValidateDataAnnotations()
             .ValidateOnStart();
     }
@@ -55,7 +62,49 @@ try
     builder.Services.AddApplication();
 
     builder.Services.AddControllers();
-    builder.Services.AddOpenApi();
+    builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+        .AddJwtBearer(options =>
+        {
+            options.TokenValidationParameters = new TokenValidationParameters
+            {
+                ValidateIssuerSigningKey = true,
+                IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSettings.Secret)),
+                ValidateIssuer = true,
+                ValidIssuer = jwtSettings.Issuer,
+                ValidateAudience = true,
+                ValidAudience = jwtSettings.Audience,
+                ValidateLifetime = true,
+                ClockSkew = TimeSpan.FromMinutes(1)
+            };
+        });
+    builder.Services.AddAuthorization();
+    builder.Services.AddSwaggerGen(options =>
+    {
+        const string bearerSchemeId = JwtBearerDefaults.AuthenticationScheme;
+
+        options.SwaggerDoc("v1", new OpenApiInfo
+        {
+            Title = "Clean KISS Architecture API",
+            Version = "v1",
+            Description = "Student management API secured with JWT bearer tokens."
+        });
+
+        var bearerScheme = new OpenApiSecurityScheme
+        {
+            Name = "Authorization",
+            Description = "Paste a JWT bearer token. Example: Bearer eyJhbGciOi...",
+            In = ParameterLocation.Header,
+            Type = SecuritySchemeType.Http,
+            Scheme = "bearer",
+            BearerFormat = "JWT"
+        };
+
+        options.AddSecurityDefinition(bearerSchemeId, bearerScheme);
+        options.AddSecurityRequirement(document => new OpenApiSecurityRequirement
+        {
+            [new OpenApiSecuritySchemeReference(bearerSchemeId, document, null!)] = []
+        });
+    });
 
     // API Versioning
     builder.Services.AddApiVersioning(options =>
@@ -146,7 +195,12 @@ try
     // Configure the HTTP request pipeline.
     if (app.Environment.IsDevelopment())
     {
-        app.MapOpenApi();
+        app.UseSwagger();
+        app.UseSwaggerUI(options =>
+        {
+            options.SwaggerEndpoint("/swagger/v1/swagger.json", "Clean KISS Architecture API v1");
+            options.RoutePrefix = "swagger";
+        });
     }
 
     // Correlation ID (must be first to enrich all logs)
@@ -177,6 +231,7 @@ try
 
     app.UseHttpsRedirection();
 
+    app.UseAuthentication();
     app.UseAuthorization();
 
     app.MapControllers();
