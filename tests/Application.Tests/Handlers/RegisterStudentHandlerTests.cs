@@ -144,4 +144,24 @@ public class RegisterStudentHandlerTests
         // Assert
         _unitOfWorkMock.Verify(u => u.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Never);
     }
+
+    [Fact]
+    public async Task Handle_WhenSaveHitsUniqueConstraint_ReturnsConflict()
+    {
+        // Arrange
+        var command = new RegisterStudentCommand("John Doe", "john@example.com");
+        _repositoryMock.Setup(r => r.ExistsByEmailAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+        _unitOfWorkMock.Setup(u => u.SaveChangesAsync(It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new UniqueConstraintViolationException("A student with this email already exists"));
+
+        // Act
+        var result = await _handler.Handle(command);
+
+        // Assert
+        Assert.True(result.IsFailure);
+        Assert.Equal(409, result.StatusCode);
+        Assert.Equal("A student with this email already exists", result.Error);
+        _cacheMock.Verify(c => c.RemoveAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
 }

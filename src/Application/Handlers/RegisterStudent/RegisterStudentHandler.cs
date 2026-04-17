@@ -38,7 +38,14 @@ public class RegisterStudentHandler : IHandler<RegisterStudentCommand, StudentDt
         var student = new Student(name, email);
 
         await _repository.AddAsync(student, cancellationToken);
-        await _unitOfWork.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+        }
+        catch (UniqueConstraintViolationException ex)
+        {
+            return Result<StudentDto>.Conflict(ex.Message);
+        }
 
         // Invalidate list cache
         await _cache.RemoveAsync(CacheKeys.AllStudents, cancellationToken);
